@@ -25,14 +25,23 @@ import type { OmpTimelineProjector, OmpTimelineScheduler } from "./timeline-proj
 type SessionPermissionInput = Extract<ProviderInput, { type: "session.permission" }>;
 type OmpQuestionRequest = Extract<
   Extract<OmpRpcEvent, { type: "extension_ui_request" }>,
-  { method: "select" | "confirm" | "input" | "editor" }
+  { method: "select" | "confirm" | "input" | "editor" | "ask" }
 >;
+type OmpAskRequest = Extract<OmpQuestionRequest, { method: "ask" }>;
 type Emit = (event: ProviderEvent) => void;
 
 const MAX_PENDING_PERMISSIONS = 32;
 const MAX_PENDING_PERMISSION_BYTES = 2 * 1024 * 1024;
 const MAX_RESOLVED_TOOL_APPROVAL_IDS = 1_024;
-const OMP_ASK_USER_FREEFORM_SENTINEL = "✏️ Type custom response...";
+/**
+ * Select rows that hand off to a follow-up free-text request: `ask_user` extensions follow with
+ * `input`, OMP's own `ask` fallback (hosts without `set_ask_dialog`) follows with `editor`.
+ */
+const OMP_FREEFORM_SENTINELS: readonly string[] = [
+  "✏️ Type custom response...",
+  "Other (type your own)",
+];
+const OMP_ASK_RECOMMENDED_SUFFIX = " (Recommended)";
 const MAX_FREEFORM_RESPONSE_BYTES = 64 * 1024;
 
 type PendingPermission = {
@@ -50,6 +59,14 @@ type PendingPermission = {
   turnId?: string;
   request: OmpQuestionRequest;
   freeformSentinel?: string;
+  askQuestions?: readonly PendingAskQuestion[];
+};
+/** One `ask` question as rendered on the Paseo card, with display labels mapped back to OMP. */
+type PendingAskQuestion = {
+  id: string;
+  header: string;
+  multi: boolean;
+  nativeLabels: ReadonlyMap<string, string>;
 };
 type PendingToolPermission = {
   nativeId: string;
@@ -73,6 +90,96 @@ type PendingFreeformSelection = {
 
 function permissionFingerprint(request: OmpQuestionRequest): string {
   return createHash("sha256").update(JSON.stringify(request)).digest("base64url");
+}
+
+type CardQuestion = {
+  header: string;
+  question: string;
+  options: Array<{ label: string; value?: string; description?: string; preview?: string }>;
+  multiSelect: boolean;
+  allowOther?: boolean;
+  placeholder?: string;
+  prefill?: string;
+};
+type AskAnswer = { id: string; selectedOptions: string[]; customInput?: string };
+
+function uniqueLabel(base: string, used: Set<string>): string {
+  let label = base;
+  let suffix = 2;
+  while (used.has(label)) {
+    label = `${base} (${suffix})`;
+    suffix += 1;
+  }
+  used.add(label);
+  return label;
+}
+
+/**
+ * Paseo's question card submits a multi-select answer as one string: checked option labels in
+ * click order, then any typed answer, joined with ", ". Exact labels are consumed from the front,
+ * longest first so a label containing ", " wins over its prefix; the rest is the typed answer.
+ */
+function splitMultiSelectAnswer(
+  answer: string,
+  labels: readonly string[],
+): { selected: string[]; custom: string } {
+  const candidates = [...labels].sort((left, right) => right.length - left.length);
+  const selected: string[] = [];
+  let remaining = answer;
+  while (remaining.length > 0) {
+    const label = candidates.find(
+      (candidate) =>
+        !selected.includes(candidate) &&
+        (remaining === candidate || remaining.startsWith(`${candidate}, `)),
+    );
+    if (label === undefined) break;
+    selected.push(label);
+    remaining = remaining === label ? "" : remaining.slice(label.length + 2);
+  }
+  return { selected, custom: remaining };
+}
+
+/**
+ * Converts one card answer to OMP's shape. OMP rejects unknown or repeated labels and, for
+ * single-select questions, a selection combined with typed text, so neither is ever produced.
+ */
+function askAnswer(question: PendingAskQuestion, answer: unknown): AskAnswer {
+  const parts =
+    answer === undefined || answer === null
+      ? []
+      : typeof answer === "string"
+        ? [answer]
+        : Array.isArray(answer) && answer.every((part) => typeof part === "string")
+          ? answer
+          : undefined;
+  if (!parts) throw new OmpPublicError("OMP question response is invalid");
+  const labels = [...question.nativeLabels.keys()];
+  const selectedOptions: string[] = [];
+  const custom: string[] = [];
+  const select = (label: string) => {
+    const native = question.nativeLabels.get(label);
+    if (native !== undefined && !selectedOptions.includes(native)) selectedOptions.push(native);
+  };
+  for (const part of parts) {
+    if (question.nativeLabels.has(part)) {
+      select(part);
+    } else if (question.multi) {
+      const split = splitMultiSelectAnswer(part, labels);
+      for (const label of split.selected) select(label);
+      if (split.custom.trim()) custom.push(split.custom);
+    } else if (part.trim()) {
+      custom.push(part);
+    }
+  }
+  const customInput = custom.join(", ").trim();
+  if (
+    customInput.includes("\0") ||
+    utf8Bytes(customInput) > MAX_FREEFORM_RESPONSE_BYTES ||
+    (!question.multi && selectedOptions.length + (customInput ? 1 : 0) > 1)
+  ) {
+    throw new OmpPublicError("OMP question response is invalid");
+  }
+  return { id: question.id, selectedOptions, ...(customInput ? { customInput } : {}) };
 }
 
 interface PermissionContext {
@@ -279,7 +386,7 @@ export class OmpSessionPermissions {
   }
 
   submitPendingFreeformSelection(
-    request: Extract<OmpQuestionRequest, { method: "input" }>,
+    request: Extract<OmpQuestionRequest, { method: "input" | "editor" }>,
   ): boolean {
     const pending = this.pendingFreeformSelection;
     if (!pending) return false;
@@ -505,10 +612,17 @@ export class OmpSessionPermissions {
     if (!existingId) this.permissionSequence += 1;
     const id =
       existingId ?? `omp:permission:${this.permissionNamespace}:${this.permissionSequence}`;
-    const header = this.dataFilter.text(request.title ?? "OMP question", 4_096);
+    const header = this.dataFilter.text(
+      request.method === "ask"
+        ? request.questions.length === 1
+          ? "OMP question"
+          : `OMP questions (${request.questions.length})`
+        : (request.title ?? "OMP question"),
+      4_096,
+    );
     const freeformSentinel =
-      request.method === "select" && request.options.includes(OMP_ASK_USER_FREEFORM_SENTINEL)
-        ? OMP_ASK_USER_FREEFORM_SENTINEL
+      request.method === "select"
+        ? request.options.find((option) => OMP_FREEFORM_SENTINELS.includes(option))
         : undefined;
     const optionValues = new Map<string, string>();
     const displayValues = new Map<string, string>();
@@ -523,14 +637,7 @@ export class OmpSessionPermissions {
     const options =
       request.method === "select"
         ? selectableOptions.map(({ nativeValue, index }) => {
-            const baseLabel = this.dataFilter.text(nativeValue, 4_096);
-            let label = baseLabel;
-            let suffix = 2;
-            while (usedOptionLabels.has(label)) {
-              label = `${baseLabel} (${suffix})`;
-              suffix += 1;
-            }
-            usedOptionLabels.add(label);
+            const label = uniqueLabel(this.dataFilter.text(nativeValue, 4_096), usedOptionLabels);
             const value = `${id}:option:${index}`;
             optionValues.set(value, nativeValue);
             displayValues.set(label, nativeValue);
@@ -550,6 +657,28 @@ export class OmpSessionPermissions {
         : undefined;
     const questionOptions =
       request.method === "confirm" ? [{ label: "Yes" }, { label: "No" }] : (options ?? []);
+    const ask = request.method === "ask" ? this.askCard(request) : undefined;
+    const cardQuestions: CardQuestion[] =
+      request.method === "ask"
+        ? (ask?.questions ?? [])
+        : [
+            {
+              header,
+              question: this.dataFilter.text(
+                request.method === "confirm" ? request.message : request.title,
+                64 * 1024,
+              ),
+              options: questionOptions,
+              multiSelect: false,
+              ...(freeformSentinel ? { allowOther: true } : {}),
+              ...(request.method === "input" && request.placeholder
+                ? { placeholder: this.dataFilter.text(request.placeholder, 4_096) }
+                : {}),
+              ...((request.method === "input" || request.method === "editor") && request.prefill
+                ? { prefill: this.dataFilter.text(request.prefill) }
+                : {}),
+            },
+          ];
     const actions =
       request.method === "select"
         ? [
@@ -591,7 +720,7 @@ export class OmpSessionPermissions {
       runtime: this.runtime,
       request,
       retainedBytes: boundedJsonBytes(
-        { request, header, options: questionOptions, actions },
+        { request, header, questions: cardQuestions, actions },
         MAX_PENDING_PERMISSION_BYTES,
         512,
         MAX_PENDING_PERMISSION_BYTES,
@@ -600,6 +729,7 @@ export class OmpSessionPermissions {
       ...(this.activeTurn ? { turnId: this.activeTurn.turnId } : {}),
       ...(request.timeout !== undefined ? { expiresAt: Date.now() + request.timeout } : {}),
       ...(freeformSentinel ? { freeformSentinel } : {}),
+      ...(ask ? { askQuestions: ask.pending } : {}),
     };
     let retainedPermissionBytes = pending.retainedBytes;
     for (const [permissionId, retained] of this.pendingPermissions) {
@@ -647,26 +777,7 @@ export class OmpSessionPermissions {
         ...(request.method === "confirm"
           ? { description: this.dataFilter.text(request.message, 64 * 1024) }
           : {}),
-        input: {
-          questions: [
-            {
-              header,
-              question: this.dataFilter.text(
-                request.method === "confirm" ? request.message : request.title,
-                64 * 1024,
-              ),
-              options: questionOptions,
-              multiSelect: false,
-              ...(freeformSentinel ? { allowOther: true } : {}),
-              ...(request.method === "input" && request.placeholder
-                ? { placeholder: this.dataFilter.text(request.placeholder, 4_096) }
-                : {}),
-              ...((request.method === "input" || request.method === "editor") && request.prefill
-                ? { prefill: this.dataFilter.text(request.prefill) }
-                : {}),
-            },
-          ],
-        },
+        input: { questions: cardQuestions },
         actions,
       },
     });
@@ -686,6 +797,76 @@ export class OmpSessionPermissions {
     void this.runtime
       .respondToExtensionUi({ type: "extension_ui_response", id: request.id, cancelled: true })
       .catch(() => this.handleRuntimeFailure());
+  }
+
+  /**
+   * Renders every `ask` question on one card. Headers key the card's answers and option labels
+   * come back verbatim, so both are made unique here and mapped back to OMP's labels on submit.
+   */
+  private askCard(request: OmpAskRequest): {
+    questions: CardQuestion[];
+    pending: PendingAskQuestion[];
+  } {
+    const usedHeaders = new Set<string>();
+    const questions: CardQuestion[] = [];
+    const pending: PendingAskQuestion[] = [];
+    for (const [index, question] of request.questions.entries()) {
+      const header = uniqueLabel(
+        this.dataFilter.text(question.header?.trim() || `Question ${index + 1}`, 4_096),
+        usedHeaders,
+      );
+      const usedLabels = new Set<string>();
+      const nativeLabels = new Map<string, string>();
+      const options = question.options.map((option, optionIndex) => {
+        const label = uniqueLabel(
+          `${this.dataFilter.text(option.label, 4_096)}${
+            optionIndex === question.recommended ? OMP_ASK_RECOMMENDED_SUFFIX : ""
+          }`,
+          usedLabels,
+        );
+        nativeLabels.set(label, option.label);
+        return {
+          label,
+          ...(option.description
+            ? { description: this.dataFilter.text(option.description, 16_384) }
+            : {}),
+          ...(option.preview ? { preview: this.dataFilter.text(option.preview, 64 * 1024) } : {}),
+        };
+      });
+      const multi = question.multi === true;
+      questions.push({
+        header,
+        question: this.dataFilter.text(question.question, 64 * 1024),
+        options,
+        multiSelect: multi,
+        allowOther: true,
+      });
+      pending.push({ id: question.id, header, multi, nativeLabels });
+    }
+    return { questions, pending };
+  }
+
+  /** Maps card answers to OMP's per-question `selectedOptions`/`customInput` in question order. */
+  private askResponse(
+    pending: PendingPermission,
+    response: ProviderPermissionResponse,
+  ): OmpExtensionUiResponse {
+    const answers = response.behavior === "allow" ? response.updatedInput?.answers : undefined;
+    if (
+      !pending.askQuestions ||
+      !answers ||
+      typeof answers !== "object" ||
+      Array.isArray(answers)
+    ) {
+      throw new OmpPublicError("OMP question response requires answers");
+    }
+    return {
+      type: "extension_ui_response",
+      id: pending.nativeId,
+      answers: pending.askQuestions.map((question) =>
+        askAnswer(question, (answers as Record<string, unknown>)[question.header]),
+      ),
+    };
   }
 
   private freeformSelection(
@@ -754,6 +935,7 @@ export class OmpSessionPermissions {
     if (response.behavior === "deny") {
       return { type: "extension_ui_response", id: nativeId, cancelled: true };
     }
+    if (request.method === "ask") return this.askResponse(pending, response);
     const selectedValue = response.selectedActionId
       ? pending.optionValues.get(response.selectedActionId)
       : undefined;

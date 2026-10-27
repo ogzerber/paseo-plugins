@@ -10,6 +10,7 @@ import {
   MAX_REPLAY_MESSAGES,
   NAME,
   OMP_MESSAGE_PAGE_LIMIT,
+  OmpAskDialogEnabledSchema,
   type OmpAvailableCommand,
   OmpAvailableCommandsResultSchema,
   OmpBranchMessagesResultSchema,
@@ -18,6 +19,7 @@ import {
   type OmpCompactionResult,
   OmpCompactionResultSchema,
   type OmpExtensionUiResponse,
+  OmpExtensionUiResponseSchema,
   type OmpHostToolDefinition,
   OmpHostToolDefinitionSchema,
   type OmpHostToolResult,
@@ -546,7 +548,7 @@ class OmpRpcSession implements OmpRuntimeSession {
   }
 
   respondToExtensionUi(response: OmpExtensionUiResponse): Promise<void> {
-    return this.process.sendFrame(response);
+    return this.process.sendFrame(OmpExtensionUiResponseSchema.parse(response));
   }
   respondToToolApproval(response: OmpToolApprovalResponse): Promise<void> {
     return this.process.sendFrame(OmpToolApprovalResponseSchema.parse(response));
@@ -652,6 +654,7 @@ export class OmpRpcRuntime implements OmpRuntime {
         }),
       );
       options.signal?.throwIfAborted();
+      enableAskDialog(process);
       return new OmpRpcSession(
         process,
         removeAbortListener,
@@ -670,4 +673,18 @@ export class OmpRpcRuntime implements OmpRuntime {
       throw error;
     }
   }
+}
+
+/**
+ * Opts into OMP's single-request `ask` dialog so every question reaches Paseo as one card that can
+ * be revisited before submitting. OMP applies the flag in command order, so it is set before any
+ * later prompt can ask; startup does not wait for the acknowledgement. OMP releases without
+ * `set_ask_dialog` reject it and keep the per-question select/editor fallback, which the
+ * permission bridge still handles.
+ */
+function enableAskDialog(process: OmpRpcProcess): void {
+  process
+    .request({ type: "set_ask_dialog", enabled: true })
+    .then((data) => OmpAskDialogEnabledSchema.parse(data))
+    .catch(() => undefined);
 }

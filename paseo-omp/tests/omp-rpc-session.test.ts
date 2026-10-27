@@ -108,7 +108,7 @@ describe("OMP RPC transport", () => {
     await session.prompt("", images);
     await session.steer("", images);
     await session.followUp("", images);
-    expect(commands.slice(1)).toEqual([
+    expect(commands.slice(2)).toEqual([
       expect.objectContaining({ type: "prompt", message: "", images }),
       expect.objectContaining({ type: "steer", message: "", images }),
       expect.objectContaining({ type: "follow_up", message: "", images }),
@@ -116,8 +116,46 @@ describe("OMP RPC transport", () => {
 
     await expect(session.prompt("")).rejects.toThrow("Invalid OMP prompt");
     await expect(session.steer("")).rejects.toThrow("Invalid OMP steer");
-    expect(commands).toHaveLength(4);
+    expect(commands).toHaveLength(5);
     await session.close();
+  });
+
+  test("opts into the single ask dialog after negotiation and tolerates older OMP", async () => {
+    for (const supported of [true, false]) {
+      const child = new FakeRpcChild();
+      const commands: Record<string, unknown>[] = [];
+      observeCommands(child, (command) => {
+        commands.push(command);
+        if (command.type === "set_ask_dialog" && !supported) {
+          child.write({
+            type: "response",
+            id: command.id,
+            command: "set_ask_dialog",
+            success: false,
+            error: "Unknown command: set_ask_dialog",
+          });
+          return;
+        }
+        child.write({
+          type: "response",
+          id: command.id,
+          success: true,
+          ...(command.type === "negotiate_protocol" ? { data: { protocolVersion: 2 } } : {}),
+          ...(command.type === "set_ask_dialog" ? { data: { enabled: true } } : {}),
+        });
+      });
+      const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+      child.write(READY_FRAME);
+      const session = await opening;
+      await session.prompt("hello");
+      expect(commands.map((command) => command.type)).toEqual([
+        "negotiate_protocol",
+        "set_ask_dialog",
+        "prompt",
+      ]);
+      expect(commands[1]).toMatchObject({ type: "set_ask_dialog", enabled: true });
+      await session.close();
+    }
   });
 
   test("accepts image stream events and blocked todos without breaking later frames", async () => {

@@ -2280,13 +2280,17 @@ export class OmpProviderSession implements OmpOpenedSession {
         this.permissions.resolvePermissionByNativeId(event.targetId ?? "");
         return;
       }
-      if (event.method === "input" && this.permissions.submitPendingFreeformSelection(event))
+      if (
+        (event.method === "input" || event.method === "editor") &&
+        this.permissions.submitPendingFreeformSelection(event)
+      )
         return;
       if (
         event.method === "select" ||
         event.method === "confirm" ||
         event.method === "input" ||
-        event.method === "editor"
+        event.method === "editor" ||
+        event.method === "ask"
       ) {
         if (!this.capabilities.includes("permission")) {
           this.handleRuntimeFailure();
@@ -2459,7 +2463,9 @@ export class OmpProviderSession implements OmpOpenedSession {
     if (event.type === "tool_execution_start") turn.activeToolCallIds.add(event.toolCallId);
     if (event.type === "tool_execution_end") {
       turn.activeToolCallIds.delete(event.toolCallId);
-      if (event.toolName === "ask_user") this.permissions.clearPendingFreeformSelection();
+      if (event.toolName === "ask_user" || event.toolName === "ask") {
+        this.permissions.clearPendingFreeformSelection();
+      }
     }
     if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
       try {

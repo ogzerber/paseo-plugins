@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { OmpExtensionUiResponseSchema } from "../server/provider/omp-rpc-protocol";
 import {
   createHarness,
   FakeOmpRuntime,
@@ -186,6 +187,218 @@ describe("OMP direct provider", () => {
       },
     });
     await finishTurn(events, session, turnId);
+    await connection.close();
+  });
+
+  test("renders a multi-question ask as one revisitable card and maps every answer shape", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const askRequest = (id: string) => ({
+      type: "extension_ui_request" as const,
+      id,
+      method: "ask" as const,
+      questions: [
+        {
+          id: "env",
+          question: "Which environment?",
+          header: "Target",
+          options: [
+            { label: "Staging", description: "Safe" },
+            { label: "Production", preview: "deploy prod" },
+          ],
+          recommended: 0,
+        },
+        {
+          id: "checks",
+          question: "Which checks?",
+          header: "Target",
+          options: [
+            { label: "Lint" },
+            { label: "Unit, fast" },
+            { label: "Unit" },
+            { label: "Lint" },
+          ],
+          multi: true,
+        },
+        { id: "note", question: "Anything else?", options: [] },
+      ],
+    });
+    const publish = (id: string) => {
+      session.emit(askRequest(id));
+      const permission = events.findLast(
+        (event) => event.type === "session.permission" && event.request.name === "omp.ask",
+      );
+      if (permission?.type !== "session.permission") throw new Error("Expected ask permission");
+      return permission.request;
+    };
+    const answer = async (id: string, answers: Record<string, string>) => {
+      const request = publish(id);
+      await connection.send({
+        type: "session.permission",
+        sessionId: "session-1",
+        permissionId: request.id,
+        response: { behavior: "allow", selectedActionId: "submit", updatedInput: { answers } },
+      });
+      const response = session.extensionUiResponses.at(-1);
+      expect(OmpExtensionUiResponseSchema.parse(response)).toEqual(response);
+      return response;
+    };
+
+    const card = publish("ask-card");
+    expect(card.kind).toBe("question");
+    expect(card.input?.questions).toEqual([
+      {
+        header: "Target",
+        question: "Which environment?",
+        options: [
+          { label: "Staging (Recommended)", description: "Safe" },
+          { label: "Production", preview: "deploy prod" },
+        ],
+        multiSelect: false,
+        allowOther: true,
+      },
+      {
+        header: "Target (2)",
+        question: "Which checks?",
+        options: [
+          { label: "Lint" },
+          { label: "Unit, fast" },
+          { label: "Unit" },
+          { label: "Lint (2)" },
+        ],
+        multiSelect: true,
+        allowOther: true,
+      },
+      {
+        header: "Question 3",
+        question: "Anything else?",
+        options: [],
+        multiSelect: false,
+        allowOther: true,
+      },
+    ]);
+    await connection.send({
+      type: "session.permission",
+      sessionId: "session-1",
+      permissionId: card.id,
+      response: { behavior: "deny" },
+    });
+    expect(session.extensionUiResponses.at(-1)).toEqual({
+      type: "extension_ui_response",
+      id: "ask-card",
+      cancelled: true,
+    });
+
+    expect(
+      await answer("ask-options", {
+        Target: "Staging (Recommended)",
+        "Target (2)": "Unit, fast, Lint (2)",
+        "Question 3": "Ship it",
+      }),
+    ).toEqual({
+      type: "extension_ui_response",
+      id: "ask-options",
+      answers: [
+        { id: "env", selectedOptions: ["Staging"] },
+        { id: "checks", selectedOptions: ["Unit, fast", "Lint"] },
+        { id: "note", selectedOptions: [], customInput: "Ship it" },
+      ],
+    });
+    expect(
+      await answer("ask-custom", {
+        Target: "Canary ring",
+        "Target (2)": "Unit, Lint, also smoke, then e2e",
+      }),
+    ).toEqual({
+      type: "extension_ui_response",
+      id: "ask-custom",
+      answers: [
+        { id: "env", selectedOptions: [], customInput: "Canary ring" },
+        {
+          id: "checks",
+          selectedOptions: ["Unit", "Lint"],
+          customInput: "also smoke, then e2e",
+        },
+        { id: "note", selectedOptions: [] },
+      ],
+    });
+
+    const invalid = publish("ask-invalid");
+    await expect(
+      connection.send({
+        type: "session.permission",
+        sessionId: "session-1",
+        permissionId: invalid.id,
+        response: {
+          behavior: "allow",
+          updatedInput: { answers: { Target: ["Production", "typed too"] } },
+        },
+      }),
+    ).rejects.toThrow("OMP question response is invalid");
+    session.emit({
+      type: "extension_ui_request",
+      id: "cancel-ask",
+      method: "cancel",
+      targetId: "ask-invalid",
+    });
+    expect(events).toContainEqual({
+      type: "session.permission_resolved",
+      sessionId: "session-1",
+      permissionId: invalid.id,
+    });
+    await connection.close();
+  });
+
+  test("answers OMP's ask fallback editor with the text typed for Other", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    turnIdFrom(await startPrompt(connection, events, "fallback-turn", "choose"));
+    session.emit({
+      type: "extension_ui_request",
+      id: "fallback-select",
+      method: "select",
+      title: "Which environment? (1/2)",
+      options: ["Staging (Recommended)", "Production", "Other (type your own)"],
+    });
+    const permission = events.findLast((event) => event.type === "session.permission");
+    if (permission?.type !== "session.permission") throw new Error("Expected fallback permission");
+    expect(permission.request.input?.questions).toEqual([
+      expect.objectContaining({
+        options: [
+          expect.objectContaining({ label: "Staging (Recommended)" }),
+          expect.objectContaining({ label: "Production" }),
+        ],
+        allowOther: true,
+      }),
+    ]);
+    await connection.send({
+      type: "session.permission",
+      sessionId: "session-1",
+      permissionId: permission.request.id,
+      response: {
+        behavior: "allow",
+        updatedInput: { answers: { "Which environment? (1/2)": "Canary ring" } },
+      },
+    });
+    session.emit({
+      type: "extension_ui_request",
+      id: "fallback-editor",
+      method: "editor",
+      title: "Which environment? (1/2)",
+      promptStyle: true,
+    });
+    await Promise.resolve();
+    expect(session.extensionUiResponses).toEqual([
+      { type: "extension_ui_response", id: "fallback-select", value: "Other (type your own)" },
+      { type: "extension_ui_response", id: "fallback-editor", value: "Canary ring" },
+    ]);
+    expect(
+      events.filter(
+        (event) => event.type === "session.permission" && event.request.name === "omp.editor",
+      ),
+    ).toHaveLength(0);
     await connection.close();
   });
 

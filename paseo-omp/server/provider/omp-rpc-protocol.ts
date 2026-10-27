@@ -155,7 +155,7 @@ export const OMP_RPC_COMMAND_POLICIES = {
   predict_word_feedback: "unsupported",
   promote_queued_message: "unsupported",
   remove_queued_message: "unsupported",
-  set_ask_dialog: "unsupported",
+  set_ask_dialog: "implemented",
   set_cache_warming: "unsupported",
   set_slow_mode: "unsupported",
   steer_subagent: "unsupported",
@@ -524,6 +524,10 @@ const OMP_PROVIDER_NAME = NAME.refine((provider) => !provider.includes("/"));
 const TEXT = boundedString(MAX_TEXT_LENGTH);
 const RAW_DISPLAY_TEXT = boundedString(MAX_IMAGE_DATA_LENGTH);
 const DISPLAY_TRUNCATION_MARKER = "<truncated>";
+/** OMP's `ask` tool has no upstream caps; these bound one dialog like the select schema does. */
+export const MAX_ASK_QUESTIONS = 32;
+export const MAX_ASK_OPTIONS = 128;
+const MAX_ASK_QUESTION_ID_BYTES = 4_096;
 
 function boundRawDisplayContent(value: unknown): unknown {
   if (typeof value === "string") {
@@ -634,6 +638,7 @@ export const OMP_RPC_DIAGNOSTIC_COMMANDS = [
   "get_messages",
   "abort",
   "set_host_tools",
+  "set_ask_dialog",
 ] as const;
 export type OmpRpcDiagnosticCommand = (typeof OMP_RPC_DIAGNOSTIC_COMMANDS)[number];
 type JsonBoundViolation = {
@@ -1695,6 +1700,44 @@ const OmpExtensionUiRequestSchema = z.discriminatedUnion("method", [
       timeout: z.number().nonnegative().finite().optional(),
     })
     .strict(),
+  z
+    .object({
+      ...ExtensionUiBase,
+      method: z.literal("ask"),
+      questions: z
+        .array(
+          z
+            .object({
+              id: boundedString(MAX_ASK_QUESTION_ID_BYTES, 1),
+              question: boundedString(64 * 1024),
+              header: boundedString(4_096).optional(),
+              options: z
+                .array(
+                  z
+                    .object({
+                      label: boundedString(4_096),
+                      description: boundedString(16_384).optional(),
+                      preview: boundedString(64 * 1024).optional(),
+                    })
+                    .strict(),
+                )
+                .max(MAX_ASK_OPTIONS),
+              multi: z.boolean().optional(),
+              recommended: z.number().int().nonnegative().optional(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(MAX_ASK_QUESTIONS),
+      timeout: z.number().nonnegative().finite().optional(),
+    })
+    .strict()
+    .superRefine((request, context) => {
+      const ids = new Set(request.questions.map((question) => question.id));
+      if (ids.size !== request.questions.length) {
+        context.addIssue({ code: "custom", message: "invalid extension UI request" });
+      }
+    }),
   z.object({ ...ExtensionUiBase, method: z.literal("cancel"), targetId: IDENTIFIER }).strict(),
   z
     .object({
@@ -1980,7 +2023,37 @@ export interface OmpPersistedSessionMessages {
 
 export type OmpAvailableCommand = z.infer<typeof OmpAvailableCommandSchema>;
 export type OmpImage = { type: "image"; data: string; mimeType: string };
-export type OmpExtensionUiResponse =
-  | { type: "extension_ui_response"; id: string; value: string }
-  | { type: "extension_ui_response"; id: string; confirmed: boolean }
-  | { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean };
+export const OmpExtensionUiResponseSchema = z.union([
+  z.object({ type: z.literal("extension_ui_response"), id: IDENTIFIER, value: TEXT }).strict(),
+  z
+    .object({ type: z.literal("extension_ui_response"), id: IDENTIFIER, confirmed: z.boolean() })
+    .strict(),
+  z
+    .object({
+      type: z.literal("extension_ui_response"),
+      id: IDENTIFIER,
+      cancelled: z.literal(true),
+      timedOut: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("extension_ui_response"),
+      id: IDENTIFIER,
+      answers: z
+        .array(
+          z
+            .object({
+              id: boundedString(MAX_ASK_QUESTION_ID_BYTES, 1),
+              selectedOptions: z.array(boundedString(4_096)).max(MAX_ASK_OPTIONS),
+              customInput: TEXT.optional(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(MAX_ASK_QUESTIONS),
+    })
+    .strict(),
+]);
+export type OmpExtensionUiResponse = z.infer<typeof OmpExtensionUiResponseSchema>;
+export const OmpAskDialogEnabledSchema = z.object({ enabled: z.boolean() }).strict();
