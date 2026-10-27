@@ -158,6 +158,35 @@ describe("OMP RPC transport", () => {
     }
   });
 
+  test("rejects, rather than throws, when an extension UI response is malformed", async () => {
+    const child = new FakeRpcChild();
+    const commands: Record<string, unknown>[] = [];
+    observeCommands(child, (command) => {
+      commands.push(command);
+      child.write({
+        type: "response",
+        id: command.id,
+        success: true,
+        ...(command.type === "negotiate_protocol" ? { data: { protocolVersion: 2 } } : {}),
+        ...(command.type === "set_ask_dialog" ? { data: { enabled: true } } : {}),
+      });
+    });
+    const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+
+    let pending: Promise<void> | undefined;
+    expect(() => {
+      pending = session.respondToExtensionUi({
+        type: "extension_ui_response",
+        id: "ask-1",
+        answers: [],
+      });
+    }).not.toThrow();
+    await expect(pending).rejects.toThrow();
+    await session.close();
+  });
+
   test("accepts image stream events and blocked todos without breaking later frames", async () => {
     const child = new FakeRpcChild();
     observeCommands(child, (command) => {

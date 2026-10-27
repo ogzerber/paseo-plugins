@@ -548,7 +548,10 @@ class OmpRpcSession implements OmpRuntimeSession {
   }
 
   respondToExtensionUi(response: OmpExtensionUiResponse): Promise<void> {
-    return this.process.sendFrame(OmpExtensionUiResponseSchema.parse(response));
+    // Callers chain `.catch` without a surrounding try, so a bad frame must reject, not throw.
+    const parsed = OmpExtensionUiResponseSchema.safeParse(response);
+    if (!parsed.success) return Promise.reject(parsed.error);
+    return this.process.sendFrame(parsed.data);
   }
   respondToToolApproval(response: OmpToolApprovalResponse): Promise<void> {
     return this.process.sendFrame(OmpToolApprovalResponseSchema.parse(response));
