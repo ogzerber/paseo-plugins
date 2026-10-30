@@ -1,7 +1,7 @@
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import { Modal } from "@getpaseo/plugin/client/ui";
+import { Modal, ScrollView } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useState } from "react";
-import { Image, Pressable, ScrollView, Text, useWindowDimensions, View } from "react-native";
+import { Image, Pressable, Text, useWindowDimensions, View } from "react-native";
 import { type OmpImageTimelineData, visibleOmpImageText } from "../shared/provider-image";
 
 export function OmpImageTimeline({ item, theme }: PluginTimelineItemProps<OmpImageTimelineData>) {
@@ -32,8 +32,8 @@ export function OmpImageTimeline({ item, theme }: PluginTimelineItemProps<OmpIma
     }),
     [theme],
   );
-  const [enlargedIndex, setEnlargedIndex] = useState<number | null>(null);
-  const enlarged = enlargedIndex === null ? undefined : item.data.images[enlargedIndex];
+  const [enlargedId, setEnlargedId] = useState<string | null>(null);
+  const enlarged = item.data.images.find((image) => image.id === enlargedId);
   const [failedImageIds, setFailedImageIds] = useState<ReadonlySet<string>>(() => new Set());
   const visibleText = useMemo(() => visibleOmpImageText(item.data.text), [item.data.text]);
   return (
@@ -53,7 +53,7 @@ export function OmpImageTimeline({ item, theme }: PluginTimelineItemProps<OmpIma
             key={image.id}
             accessibilityRole="imagebutton"
             accessibilityLabel={`Enlarge ${item.data.label} image ${index + 1}`}
-            onPress={() => setEnlargedIndex(index)}
+            onPress={() => setEnlargedId(image.id)}
           >
             <Image
               source={{ uri: `data:${image.mimeType};base64,${image.data}` }}
@@ -74,12 +74,14 @@ export function OmpImageTimeline({ item, theme }: PluginTimelineItemProps<OmpIma
         title={item.data.label}
         open={enlarged !== undefined}
         onOpenChange={(open) => {
-          if (!open) setEnlargedIndex(null);
+          if (!open) setEnlargedId(null);
         }}
       >
         <Modal.Content scrollable={false}>
           {enlarged ? (
             <EnlargedImage
+              key={enlarged.id}
+              failed={failedImageIds.has(enlarged.id)}
               uri={`data:${enlarged.mimeType};base64,${enlarged.data}`}
               label={item.data.label}
               theme={theme}
@@ -95,21 +97,24 @@ export function OmpImageTimeline({ item, theme }: PluginTimelineItemProps<OmpIma
 function EnlargedImage({
   uri,
   label,
+  failed,
   theme,
 }: {
   uri: string;
+  failed: boolean;
   label: string;
   theme: PluginTimelineItemProps<OmpImageTimelineData>["theme"];
 }) {
   const screen = useWindowDimensions();
   const [natural, setNatural] = useState<{ width: number; height: number } | null>(null);
   const [actualSize, setActualSize] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   useEffect(() => {
     let current = true;
     Image.getSize(
       uri,
       (width, height) => current && setNatural({ width, height }),
-      () => undefined,
+      () => current && setLoadFailed(true),
     );
     return () => {
       current = false;
@@ -117,6 +122,14 @@ function EnlargedImage({
   }, [uri]);
   const height = Math.round(screen.height * 0.7);
   const canZoom = natural !== null;
+  const mutedText = {
+    color: theme.colors.foregroundMuted,
+    fontSize: 12,
+    textAlign: "center" as const,
+  };
+  if (failed) {
+    return <Text style={mutedText}>This image could not be rendered on this Paseo client.</Text>;
+  }
   return (
     <View style={{ gap: 8 }}>
       <Pressable
@@ -128,8 +141,8 @@ function EnlargedImage({
         onPress={() => setActualSize((value) => !value)}
       >
         {actualSize && natural ? (
-          <ScrollView style={{ height }} nestedScrollEnabled>
-            <ScrollView horizontal nestedScrollEnabled>
+          <ScrollView style={{ height }}>
+            <ScrollView horizontal>
               <Image
                 source={{ uri }}
                 accessibilityLabel={`${label} enlarged image`}
@@ -142,16 +155,19 @@ function EnlargedImage({
             source={{ uri }}
             resizeMode="contain"
             accessibilityLabel={`${label} enlarged image`}
+            onError={() => setLoadFailed(true)}
             style={{ width: "100%", height }}
           />
         )}
       </Pressable>
       {canZoom ? (
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, textAlign: "center" }}>
+        <Text style={mutedText}>
           {actualSize
             ? `${natural.width} × ${natural.height}px · tap to fit`
             : `Tap the image to see it at ${natural.width} × ${natural.height}px`}
         </Text>
+      ) : loadFailed ? (
+        <Text style={mutedText}>The actual size of this image is not available.</Text>
       ) : null}
     </View>
   );
