@@ -347,6 +347,10 @@ export class FakeOmpSession implements OmpRuntimeSession {
   subagentsObserved: (() => void) | null = null;
   readonly subagentMessages = new Map<string, OmpSubagentMessagesResult>();
   readonly subagentMessageRequests: Array<{ subagentId?: string; sessionFile?: string }> = [];
+  readonly subagentCancels: string[] = [];
+  readonly subagentSteers: Array<{ subagentId: string; message: string }> = [];
+  subagentCancelResult = true;
+  subagentControlError: Error | null = null;
   availableCommandsObserved: (() => void) | null = null;
   readonly modelChanges: Array<{ provider: string; modelId: string }> = [];
   modelResponseGate: Promise<void> | null = null;
@@ -547,6 +551,17 @@ export class FakeOmpSession implements OmpRuntimeSession {
     if (this.subagentsGate) await this.subagentsGate;
     if (this.subagentsError) throw this.subagentsError;
     return this.subagents;
+  }
+
+  async cancelSubagent(subagentId: string) {
+    this.subagentCancels.push(subagentId);
+    if (this.subagentControlError) throw this.subagentControlError;
+    return this.subagentCancelResult;
+  }
+
+  async steerSubagent(subagentId: string, message: string) {
+    this.subagentSteers.push({ subagentId, message });
+    if (this.subagentControlError) throw this.subagentControlError;
   }
 
   getSubagentMessages(selector: { subagentId?: string; sessionFile?: string }) {

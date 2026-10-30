@@ -67,6 +67,27 @@ let history = [
   { role: "user", content: "replayed question", entryId: "user-root" },
   { role: "assistant", content: "replayed answer", entryId: "assistant-root" },
 ];
+const HELD_TASK_CALL_ID = "task-held";
+const HELD_SUBAGENTS = [
+  { id: "held-child", agent: "worker", description: "held child" },
+  {
+    id: "parser-review",
+    agent: "reviewer",
+    description: "Review the parser changes for regressions",
+  },
+  {
+    id: "caller-scan",
+    agent: "explore",
+    description: "Find every caller of parseConfig in the repository",
+  },
+].map((subagent, index) => ({
+  ...subagent,
+  index,
+  sessionFile: `/tmp/fake-${subagent.id}.jsonl`,
+  parentToolCallId: HELD_TASK_CALL_ID,
+}));
+type HeldSubagent = (typeof HELD_SUBAGENTS)[number];
+const heldSubagents = new Map<string, HeldSubagent>();
 const typedApprovals = process.env.PASEO_OMP_FAKE_TYPED_APPROVALS !== "0";
 const logPath = process.env.PASEO_OMP_FAKE_LOG;
 const secret = process.env.PASEO_OMP_FAKE_SECRET ?? "fake-secret-not-configured";
@@ -367,6 +388,71 @@ function emitChildContract(message: string): void {
   finish("ROOT_OK");
 }
 
+/**
+ * Running children that only `cancel_subagent` ends, so the root turn stays active meanwhile.
+ * `CONTRACT_SUBAGENT_HOLD` starts one; `CONTRACT_SUBAGENT_HOLD_TEAM` starts the two others.
+ */
+function emitHeldSubagents(message: string): void {
+  send({ type: "agent_start" });
+  send({ type: "turn_start" });
+  send({ type: "message_end", message: { role: "user", content: message, entryId: "user-held" } });
+  send({
+    type: "tool_execution_start",
+    toolCallId: HELD_TASK_CALL_ID,
+    toolName: "task",
+    args: { agent: "worker", task: "hold" },
+  });
+  const team = message.includes("CONTRACT_SUBAGENT_HOLD_TEAM");
+  for (const subagent of team ? HELD_SUBAGENTS.slice(1) : HELD_SUBAGENTS.slice(0, 1)) {
+    heldSubagents.set(subagent.id, subagent);
+    send({ type: "subagent_lifecycle", payload: { ...subagent, status: "started" } });
+  }
+}
+
+function cancelHeldSubagent(command: Record<string, unknown>): void {
+  const subagent = heldSubagents.get(String(command.subagentId));
+  respond(command, { cancelled: subagent !== undefined });
+  if (!subagent) return;
+  heldSubagents.delete(subagent.id);
+  send({ type: "subagent_lifecycle", payload: { ...subagent, status: "aborted" } });
+  if (heldSubagents.size > 0) return;
+  send({
+    type: "tool_execution_end",
+    toolCallId: HELD_TASK_CALL_ID,
+    toolName: "task",
+    result: { details: { results: [{ id: subagent.id, aborted: true }] } },
+    isError: true,
+  });
+  // Like OMP, stopping a child only settles its task call; the parent turn carries on.
+  send({ type: "message_end", message: assistant("ROOT_CONTINUES", "held-follow-up") });
+  finish("ROOT_AFTER_CANCEL");
+}
+
+function steerHeldSubagent(command: Record<string, unknown>): void {
+  const subagent = heldSubagents.get(String(command.subagentId));
+  if (!subagent) {
+    send({
+      type: "response",
+      id: command.id,
+      command: command.type,
+      success: false,
+      error: `Subagent not running: ${String(command.subagentId)}`,
+    });
+    return;
+  }
+  send({ type: "response", id: command.id, command: command.type, success: true });
+  send({
+    type: "subagent_event",
+    payload: {
+      id: subagent.id,
+      event: {
+        type: "message_end",
+        message: { role: "user", content: command.message, entryId: `${subagent.id}-steer` },
+      },
+    },
+  });
+}
+
 function emitLargeContract(message: string): void {
   send({ type: "turn_start" });
   send({ type: "agent_start" });
@@ -486,6 +572,8 @@ function handlePrompt(command: Record<string, unknown>): void {
         // The run waits on a background job whose delivery is then cancelled: no run follows.
         send({ type: "agent_end", messages: [held], isTerminal: false, awaitingAsyncWork: true });
         setTimeout(() => send({ type: "session_settled" }), 25);
+      } else if (message.includes("CONTRACT_SUBAGENT_HOLD")) {
+        emitHeldSubagents(message);
       } else if (message.includes("CONTRACT_CHILD")) {
         emitChildContract(message);
       } else if (message.includes("CONTRACT_LARGE")) {
@@ -631,7 +719,19 @@ reader.on("line", (line) => {
       respond(command, { text: "replayed question", cancelled: false });
       break;
     case "get_subagents":
-      respond(command, { subagents: [] });
+      respond(command, {
+        subagents: [...heldSubagents.values()].map((subagent) => ({
+          ...subagent,
+          status: "running",
+          lastUpdate: Date.now(),
+        })),
+      });
+      break;
+    case "cancel_subagent":
+      cancelHeldSubagent(command);
+      break;
+    case "steer_subagent":
+      steerHeldSubagent(command);
       break;
     case "get_subagent_messages":
       respond(command, {

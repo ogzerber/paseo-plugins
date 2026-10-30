@@ -70,6 +70,17 @@ Command output, setup questions, and OAuth prompts appear in the agent timeline.
 
 Paseo's exact session `toolPolicy` preapproval grants are not equivalent to OMP's `set_host_tools` contract. The plugin cannot preserve that policy exactly, so any non-empty `toolPolicy` rejects session startup. It never converts exact grants into broader access. `disallowedTools` is separate: it controls only recognized native OMP built-ins and rejects unknown names. The **OMP → Plugin** tab shows the same boundary in its Tool access boundary card.
 
+## Subagent controls
+
+Paseo shows each OMP subagent as a read-only child of its agent. While subagents run, an **OMP Plugin** agent's conversation shows one row per running subagent under the `task` card that started it, with its agent type, description, and running time:
+
+- **Steer** opens a one-line message field in place. Enter sends up to 16,384 characters through OMP's `steer_subagent` and Esc closes it. The subagent receives the message as its user at its next step, so slash commands and prompt templates run in the subagent. If OMP does not confirm delivery before the provider RPC timeout, the message may still arrive; check the subagent before sending it again.
+- **Stop** asks for confirmation in place, then calls OMP's `cancel_subagent`. OMP stops the subagent and its nested subagents; the parent turn continues and receives an aborted task result. Stopping a subagent that already finished reports that and changes nothing.
+
+Rows disappear as their subagents finish. Outcomes and errors appear as Paseo toasts. A request is routed to the subagents of the agent named in it, and only while that agent's OMP runtime is running; the controls never start or resume a runtime. OMP names subagents after their task, so rows show agent types and descriptions after the agent's `outputRedaction` and address each subagent by an opaque handle rather than its OMP ID. Both actions need OMP 18.4.9 or newer.
+
+The controls follow Paseo's client trust model. They are plugin RPCs, which the daemon only accepts from clients with its `daemon.manage` permission. That permission is a superset of what the controls can do: a `daemon.manage` client can already install plugin code on the daemon. The agent ID in a request selects the agent rather than limiting who may act on it, because the daemon passes no caller identity to the handler. A client without `daemon.manage` sees the rows but its requests are rejected.
+
 ## Credentials and environment
 
 The plugin is deny-by-default. It inherits only its fixed built-in allowlist of core provider authentication variables, exact host-wide names an operator selects in **OMP → Plugin**, and additional exact profile names under `providerOptions.inheritEnv`; it does not discover or inherit arbitrary credential-shaped names. Prefer OMP's native credential store or auth broker whenever possible.

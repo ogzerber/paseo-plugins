@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { OmpBrowserAuthorizationRegistry } from "../mcp-browser";
 import type { OmpOperationalFailureReporter } from "../operational-failure-diagnostics";
 import { probeOmpAvailability } from "../provider-diagnostics";
+import type { OmpSubagentControlRegistry } from "../subagents";
 import { mergeOmpInheritedEnvironmentNames } from "./config-normalization";
 import { createOmpConnection, OmpNativeSessionReservations } from "./connection";
 import type { OmpMcpConnector } from "./host-tools";
@@ -131,6 +132,7 @@ export interface OmpProviderOptions {
     timeoutMs: number | undefined,
   ) => Promise<ProviderAvailabilityCompat>;
   resolveHostInheritEnv?: () => Promise<readonly string[]>;
+  subagentControlRegistry?: OmpSubagentControlRegistry;
 }
 
 function stableJson(value: unknown): string {
@@ -235,6 +237,7 @@ export function createOmpProvider(options: OmpProviderOptions = {}): ProviderReg
         options.reportOperationalFailure,
         options.resolveHostInheritEnv,
         sessionLimit,
+        options.subagentControlRegistry,
       );
     },
   };

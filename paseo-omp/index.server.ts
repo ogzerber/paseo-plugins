@@ -29,6 +29,11 @@ import { OmpSessionLimit } from "./server/provider/session-limit";
 import { resolveGetOmpProviderHealth } from "./server/provider-diagnostics";
 import { resolveListOmpQuotas } from "./server/quota";
 import { resolveListOmpSessions } from "./server/sessions";
+import {
+  OmpSubagentControlRegistry,
+  resolveCancelOmpSubagent,
+  resolveSteerOmpSubagent,
+} from "./server/subagents";
 import { resolveGetOmpSupportReport } from "./server/support-diagnostics";
 import { composerPillSettings } from "./shared/composer-pill-settings";
 import { listHubProcesses, tailHubLog } from "./shared/hub";
@@ -48,6 +53,7 @@ import { getOmpProviderHealth } from "./shared/provider-diagnostics";
 import { providerLaunchSettings } from "./shared/provider-launch-settings";
 import { listOmpQuotas } from "./shared/quota";
 import { listOmpSessions } from "./shared/sessions";
+import { cancelOmpSubagent, steerOmpSubagent } from "./shared/subagents";
 import { getOmpSupportReport } from "./shared/support-diagnostics";
 
 function scoped<T extends { store?: OmpStore }, R>(handler: (input: T) => R) {
@@ -68,6 +74,7 @@ export default function contribute(server: PluginServerContext) {
     return current.status === "ready" ? current.values.maxSessions : undefined;
   });
   const removeSessionLimitListener = launchSettings.subscribe(() => sessionLimit.refresh());
+  const subagentControlRegistry = new OmpSubagentControlRegistry();
   const protocolViolations = new OmpProtocolViolationCollector();
   const operationalFailures = new OmpOperationalFailureCollector();
   const profiles = discoverOmpProfilesSync();
@@ -77,6 +84,7 @@ export default function contribute(server: PluginServerContext) {
       createProfileOmpProvider(profile, {
         browserAuthorizationRegistry,
         sessionLimit,
+        subagentControlRegistry,
         reportProtocolViolation: protocolViolations.report,
         reportOperationalFailure: operationalFailures.report,
         resolveHostInheritEnv,
@@ -104,6 +112,12 @@ export default function contribute(server: PluginServerContext) {
   server.handle(openOmpMcpAuthorizationInPaseoBrowser, (input) =>
     resolveOpenOmpMcpAuthorizationInPaseoBrowser(input, browserAuthorizationRegistry),
   );
+  server.handle(cancelOmpSubagent, (input) =>
+    resolveCancelOmpSubagent(input, subagentControlRegistry),
+  );
+  server.handle(steerOmpSubagent, (input) =>
+    resolveSteerOmpSubagent(input, subagentControlRegistry),
+  );
   const removeSessionOpenHook = server.before("agent.session_open", ({ request }) => {
     if (request.provider !== "omp-plugin" && !request.provider.startsWith("omp-plugin-")) return;
     return withOmpSessionOpenEnv(request);
@@ -112,6 +126,7 @@ export default function contribute(server: PluginServerContext) {
     createOmpProvider({
       browserAuthorizationRegistry,
       sessionLimit,
+      subagentControlRegistry,
       reportProtocolViolation: protocolViolations.report,
       reportOperationalFailure: operationalFailures.report,
       resolveHostInheritEnv,
@@ -120,6 +135,7 @@ export default function contribute(server: PluginServerContext) {
   return () => {
     browserAuthorizationRegistry.clear();
     removeSessionLimitListener();
+    subagentControlRegistry.clear();
     removeSessionOpenHook();
   };
 }

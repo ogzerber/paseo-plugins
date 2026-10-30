@@ -16,6 +16,7 @@ import {
   OmpBranchMessagesResultSchema,
   type OmpBranchResult,
   OmpBranchResultSchema,
+  OmpCancelSubagentResultSchema,
   type OmpCompactionResult,
   OmpCompactionResultSchema,
   type OmpExtensionUiResponse,
@@ -41,6 +42,7 @@ import {
   OmpSessionStateSchema,
   type OmpSessionStats,
   OmpSessionStatsSchema,
+  OmpSteerSubagentResultSchema,
   type OmpSubagentMessagesResult,
   OmpSubagentMessagesResultSchema,
   type OmpSubagentSnapshot,
@@ -105,6 +107,9 @@ export interface OmpRuntimeSession {
     subagentId?: string;
     sessionFile?: string;
   }): Promise<OmpSubagentMessagesResult>;
+  /** Resolves `false` when OMP no longer lists the subagent as running for this session. */
+  cancelSubagent(subagentId: string): Promise<boolean>;
+  steerSubagent(subagentId: string, message: string): Promise<void>;
   prompt(
     message: string,
     images?: readonly OmpImage[],
@@ -462,6 +467,26 @@ class OmpRpcSession implements OmpRuntimeSession {
       await this.process.request({
         type: "get_subagent_messages",
         ...(subagentId ? { subagentId } : { sessionFile }),
+      }),
+    );
+  }
+
+  async cancelSubagent(subagentId: string): Promise<boolean> {
+    const safeId = validateBoundedText(subagentId, "subagent identifier", MAX_ID_LENGTH);
+    return OmpCancelSubagentResultSchema.parse(
+      await this.process.request({ type: "cancel_subagent", subagentId: safeId }),
+    ).cancelled;
+  }
+
+  async steerSubagent(subagentId: string, message: string): Promise<void> {
+    const safeId = validateBoundedText(subagentId, "subagent identifier", MAX_ID_LENGTH);
+    const safeMessage = validateBoundedText(message, "subagent steering message", MAX_TEXT_LENGTH);
+    if (!safeMessage.trim()) throw new Error("Invalid OMP subagent steering message");
+    OmpSteerSubagentResultSchema.parse(
+      await this.process.request({
+        type: "steer_subagent",
+        subagentId: safeId,
+        message: safeMessage,
       }),
     );
   }

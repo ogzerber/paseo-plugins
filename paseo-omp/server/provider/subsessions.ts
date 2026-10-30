@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 import { basename, extname, isAbsolute } from "node:path";
 import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { z } from "zod";
+import {
+  MAX_OMP_SUBAGENT_STRIP_ENTRIES,
+  OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH,
+  OMP_SUBAGENT_STRIP_KIND,
+  type OmpSubagentStrip,
+} from "../../shared/subagents";
 import type { OmpRuntime, OmpRuntimeSession } from "./omp-rpc";
 import type {
   OmpAgentSessionEvent,
@@ -56,6 +62,7 @@ type ChildState = {
   sessionClosed: boolean;
   replayUnavailable?: boolean;
   seenInSnapshot: boolean;
+  runningSince: number;
   seenAssistantIdentities: BoundedStringSet;
   projector: OmpTimelineProjector;
 };
@@ -305,6 +312,19 @@ function terminalStatus(status: string): ChildTerminalStatus | undefined {
   return;
 }
 
+/**
+ * OMP derives subagent IDs from model-chosen task names, so clients only see this opaque handle,
+ * scoped to the provider session that owns the subagent.
+ */
+export function ompSubagentHandle(sessionId: string, nativeId: string): string {
+  return createHash("sha256")
+    .update(sessionId)
+    .update("\0")
+    .update(nativeId)
+    .digest("base64url")
+    .slice(0, 32);
+}
+
 function bufferedNativeId(event: OmpSubagentEvent): string {
   return event.type === "subagent_progress" ? event.payload.progress.id : event.payload.id;
 }
@@ -314,6 +334,10 @@ export class OmpSubsessionProjector {
   private readonly sessionIdByNativeId = new Map<string, string>();
   private readonly toolOwners = new Map<string, string>();
   private readonly dispatches = new Map<string, TaskDispatch>();
+  /** Last published payload of each non-empty subagent control strip, by timeline item ID. */
+  private readonly controlStrips = new Map<string, string>();
+  /** Root `task` calls whose tool card the root timeline has published, oldest first. */
+  private readonly anchoredRootTasks = new Set<string>();
   private readonly bufferedEvents: BufferedSubagentEvent[] = [];
   // null means every child observed during this replay is omitted after tombstone saturation.
   private omittedBufferedChildren: Set<string> | null = new Set();
@@ -368,7 +392,7 @@ export class OmpSubsessionProjector {
     if (event.isError) {
       this.dispatches.delete(event.toolCallId);
       this.toolOwners.delete(event.toolCallId);
-      this.onActivityChange();
+      this.activityChanged();
       return;
     }
     dispatch.acknowledged = true;
@@ -462,6 +486,82 @@ export class OmpSubsessionProjector {
     this.reconcileSnapshots(await runtime.getSubagents());
   }
 
+  private activityChanged(): void {
+    this.publishControlStrips();
+    this.onActivityChange();
+  }
+
+  /**
+   * Marks a root `task` call whose tool card is now in the root timeline. Its control strip is
+   * published only after this, so the strip lands below the card even when subagent frames
+   * arrive while the turn's own events are still buffered.
+   */
+  anchorRootTask(toolCallId: string): void {
+    if (this.anchoredRootTasks.size >= MAX_TASK_DISPATCHES) {
+      const oldest = this.anchoredRootTasks.values().next().value;
+      if (oldest !== undefined) this.anchoredRootTasks.delete(oldest);
+    }
+    this.anchoredRootTasks.add(toolCallId);
+    this.publishControlStrips();
+  }
+
+  /**
+   * Publishes one plugin timeline row per root `task` call, below its tool card, listing the
+   * call's running subagents so the client can steer or cancel them in place. A row is emptied
+   * rather than removed when its subagents finish.
+   */
+  private publishControlStrips(): void {
+    if (!this.pluginTimelineEnabled || this.closed) return;
+    const strips = new Map<string, OmpSubagentStrip["subagents"]>();
+    for (const child of this.children.values()) {
+      if (child.status !== "running") continue;
+      const taskCallId = this.rootTaskCallId(child);
+      if (!taskCallId || !this.anchoredRootTasks.has(taskCallId)) continue;
+      const id = `omp:subagents:${taskCallId}`;
+      const entries = strips.get(id) ?? [];
+      if (entries.length >= MAX_OMP_SUBAGENT_STRIP_ENTRIES) continue;
+      entries.push({
+        id: ompSubagentHandle(this.rootSessionId, child.nativeId),
+        agent: child.title,
+        description: child.description
+          ? this.dataFilter.text(child.description, OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH)
+          : null,
+        runningSince: child.runningSince,
+      });
+      strips.set(id, entries);
+    }
+    for (const id of new Set([...this.controlStrips.keys(), ...strips.keys()])) {
+      const data: OmpSubagentStrip = { subagents: strips.get(id) ?? [] };
+      const payload = JSON.stringify(data);
+      if (this.controlStrips.get(id) === payload) continue;
+      if (data.subagents.length > 0) this.controlStrips.set(id, payload);
+      else this.controlStrips.delete(id);
+      this.emit({
+        type: "timeline.item",
+        sessionId: this.rootSessionId,
+        item: {
+          type: "plugin",
+          id,
+          pluginId: "paseo-omp",
+          kind: OMP_SUBAGENT_STRIP_KIND,
+          version: 1,
+          data,
+        },
+      });
+    }
+  }
+
+  /** The root timeline's `task` call that a subagent descends from, when it is known. */
+  private rootTaskCallId(child: ChildState): string | undefined {
+    let current = child;
+    for (let depth = 0; current.parentSessionId !== this.rootSessionId; depth += 1) {
+      const parent = this.children.get(current.parentSessionId);
+      if (!parent || depth >= MAX_CHILDREN) return;
+      current = parent;
+    }
+    return current.parentToolCallId;
+  }
+
   hasActiveChildren(): boolean {
     for (const child of this.children.values()) if (child.status === "running") return true;
     for (const dispatch of this.dispatches.values()) if (dispatch.acknowledged) return true;
@@ -474,7 +574,7 @@ export class OmpSubsessionProjector {
     }
     this.dispatches.clear();
     this.toolOwners.clear();
-    this.onActivityChange();
+    this.activityChanged();
   }
 
   close(): void {
@@ -626,7 +726,7 @@ export class OmpSubsessionProjector {
       const terminal = terminalStatus(event.payload.status);
       if (terminal) this.requestTerminal(child, terminal);
       else if (event.payload.status === "started") this.restartChild(child);
-      this.onActivityChange();
+      this.activityChanged();
       return;
     }
     if (event.type === "subagent_progress") {
@@ -643,7 +743,7 @@ export class OmpSubsessionProjector {
       const terminal = terminalStatus(event.payload.progress.status);
       if (terminal) this.requestTerminal(child, terminal);
       else this.restartChild(child);
-      this.onActivityChange();
+      this.activityChanged();
       return;
     }
     const sessionId = this.sessionIdByNativeId.get(event.payload.id);
@@ -701,6 +801,7 @@ export class OmpSubsessionProjector {
       ...(ref.sessionFile ? { sessionFile: ref.sessionFile } : {}),
       ...(ref.parentToolCallId ? { parentToolCallId: ref.parentToolCallId } : {}),
       status: "running",
+      runningSince: Date.now(),
       sessionClosed: false,
       seenAssistantIdentities: new BoundedStringSet(MAX_CHILD_MESSAGE_IDENTITIES),
       seenInSnapshot: false,
@@ -739,6 +840,7 @@ export class OmpSubsessionProjector {
     child.replayUnavailable = false;
     if (child.status === "running") return;
     child.status = "running";
+    child.runningSince = Date.now();
     child.terminalRequested = undefined;
     child.seenInSnapshot = false;
     child.turnSequence += 1;
@@ -784,7 +886,7 @@ export class OmpSubsessionProjector {
     if (parent?.terminalRequested && !this.hasDirectActivity(parent.sessionId)) {
       this.finishChild(parent, parent.terminalRequested);
     }
-    this.onActivityChange();
+    this.activityChanged();
   }
   private failReplayChild(child: ChildState): void {
     child.replayUnavailable = true;
@@ -812,7 +914,7 @@ export class OmpSubsessionProjector {
     if (owner?.terminalRequested && !this.hasDirectActivity(owner.sessionId)) {
       this.finishChild(owner, owner.terminalRequested);
     }
-    this.onActivityChange();
+    this.activityChanged();
   }
 
   private resolveParent(parentToolCallId?: string, sessionFile?: string): string {
@@ -864,7 +966,7 @@ export class OmpSubsessionProjector {
         this.requestTerminal(child, "completed");
       }
     }
-    this.onActivityChange();
+    this.activityChanged();
   }
 
   private async replaySnapshots(

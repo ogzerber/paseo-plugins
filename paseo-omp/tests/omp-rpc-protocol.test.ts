@@ -4,6 +4,7 @@ import type {
   OmpProtocolViolationDiagnostic,
   OmpRpcEvent,
 } from "../server/provider/omp-rpc-protocol";
+import { OmpRpcRequestRejectedError } from "../server/provider/omp-rpc-transport";
 import {
   FakeRpcChild,
   NATIVE_TOOL_APPROVAL_FRAME_BYTES,
@@ -1059,6 +1060,79 @@ describe("OMP RPC transport", () => {
       id: "host-call-1",
       result: { content: [{ type: "text", text: "done" }] },
     });
+    await session.close();
+  });
+
+  test("cancels and steers subagents with native wire shapes and validated responses", async () => {
+    const child = new FakeRpcChild();
+    const commands: Record<string, unknown>[] = [];
+    const replies: Array<(command: Record<string, unknown>) => Record<string, unknown>> = [
+      () => ({ success: true, data: { cancelled: true } }),
+      () => ({ success: true, data: { cancelled: false } }),
+      () => ({ success: true, data: { cancelled: "yes" } }),
+      () => ({ success: true }),
+      () => ({ success: true, data: { queued: true } }),
+      () => ({ success: false, error: "Subagent not running: gone-child" }),
+      (command) => ({ success: false, error: `Unknown command: ${String(command.type)}` }),
+    ];
+    observeCommands(child, (command) => {
+      if (command.type === "negotiate_protocol") {
+        child.write({
+          type: "response",
+          id: command.id,
+          command: "negotiate_protocol",
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+        return;
+      }
+      if (command.type !== "cancel_subagent" && command.type !== "steer_subagent") return;
+      commands.push(command);
+      const reply = replies.shift();
+      if (!reply) throw new Error("unexpected subagent command");
+      child.write({ type: "response", id: command.id, command: command.type, ...reply(command) });
+    });
+    const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+
+    await expect(session.cancelSubagent("OmpWorker")).resolves.toBe(true);
+    await expect(session.cancelSubagent("FinishedWorker")).resolves.toBe(false);
+    await expect(session.cancelSubagent("OmpWorker")).rejects.toThrow();
+    await expect(session.steerSubagent("OmpWorker", "Drop the glob")).resolves.toBeUndefined();
+    await expect(session.steerSubagent("OmpWorker", "Again")).rejects.toThrow();
+    const notRunning = session.steerSubagent("gone-child", "focus");
+    await expect(notRunning).rejects.toBeInstanceOf(OmpRpcRequestRejectedError);
+    await expect(notRunning).rejects.toMatchObject({ code: undefined });
+    await expect(session.cancelSubagent("OmpWorker")).rejects.toMatchObject({
+      code: "unsupported_command",
+    });
+    await expect(session.steerSubagent("OmpWorker", "  \n ")).rejects.toThrow(
+      "Invalid OMP subagent steering message",
+    );
+    await expect(session.cancelSubagent("x".repeat(257))).rejects.toThrow(
+      "Invalid OMP subagent identifier",
+    );
+
+    expect(commands).toEqual([
+      { type: "cancel_subagent", subagentId: "OmpWorker", id: expect.any(String) },
+      { type: "cancel_subagent", subagentId: "FinishedWorker", id: expect.any(String) },
+      { type: "cancel_subagent", subagentId: "OmpWorker", id: expect.any(String) },
+      {
+        type: "steer_subagent",
+        subagentId: "OmpWorker",
+        message: "Drop the glob",
+        id: expect.any(String),
+      },
+      { type: "steer_subagent", subagentId: "OmpWorker", message: "Again", id: expect.any(String) },
+      {
+        type: "steer_subagent",
+        subagentId: "gone-child",
+        message: "focus",
+        id: expect.any(String),
+      },
+      { type: "cancel_subagent", subagentId: "OmpWorker", id: expect.any(String) },
+    ]);
     await session.close();
   });
 

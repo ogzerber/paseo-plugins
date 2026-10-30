@@ -31,7 +31,7 @@ paseo plugin install npm:@omercnet/paseo-omp@<version>
 paseo plugin ls paseo-omp
 ```
 
-Open the **OMP** sidebar to review the provider-profile contract, choose which composer pills appear, browse and edit native scalar settings, manage OMP-native plugins, verify runtime health, and generate a bounded support report under **Help**. The same tabs are available in the workspace OMP panel, except for the global Composer preference tab. Then create an agent and select **OMP Plugin**. Its optional **MCP** composer control runs OMP-native management commands in the current session; setup questions and authorization stay in that chat timeline, where OAuth can open in a workspace-scoped Paseo Browser or on the current device. Composer pill preferences are shared by clients connected to the same host; normal use requires no other plugin-specific settings.
+Open the **OMP** sidebar to review the provider-profile contract, choose which composer pills appear, browse and edit native scalar settings, manage OMP-native plugins, verify runtime health, and generate a bounded support report under **Help**. The same tabs are available in the workspace OMP panel, except for the global Composer preference tab. Then create an agent and select **OMP Plugin**. Its optional **MCP** composer control runs OMP-native management commands in the current session; setup questions and authorization stay in that chat timeline, where OAuth can open in a workspace-scoped Paseo Browser or on the current device. While OMP subagents run, a row under each `task` card in the conversation lets you steer or stop one of them; this needs OMP 18.4.9 or newer. Composer pill preferences are shared by clients connected to the same host; normal use requires no other plugin-specific settings.
 
 - [Install, update, rollback, and local development](docs/installation.md)
 - [Configuration and every provider option](docs/configuration.md)
@@ -84,7 +84,7 @@ Scoring is deliberately mechanical so releases remain comparable:
 | `session.revert.both` | **0%** | Not advertised because OMP cannot atomically rewind conversation and workspace files. |
 | `session.revert.conversation` | **100%** | Native branch-based conversation rewind, replay deduplication, ownership transfer, and failure quarantine. |
 | `session.revert.files` | **0%** | Not advertised because OMP does not expose a native file-only rewind contract. |
-| `session.subsession` | **100%** | Direct and nested OMP subagents become Paseo child sessions with lifecycle, ancestry, progress, and replay. |
+| `session.subsession` | **100%** | Direct and nested OMP subagents become Paseo child sessions with lifecycle, ancestry, progress, and replay. Paseo's child sessions are read-only, so the provider also publishes a plugin timeline row under each `task` card that steers or stops one running child through OMP's `steer_subagent` and `cancel_subagent` (OMP 18.4.9 or newer) without stopping the parent turn. |
 | `session.unarchive` | **0%** | Not advertised; there is no native OMP archive state to reverse. |
 | `permission` | **100%** | Typed tool permissions when negotiated, with a bounded generic interaction fallback for OMP 18.1.15. Allow, deny, cancel, timeout, and interruption are covered. |
 | `permission.tool_policy` | **0%** | Not advertised. Exact MCP preapproval policy cannot be preserved through OMP `set_host_tools`, so the plugin fails closed instead of broadening access. |

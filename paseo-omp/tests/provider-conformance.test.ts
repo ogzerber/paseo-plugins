@@ -22,6 +22,12 @@ import { ompModelId } from "../server/provider/catalog";
 import type { OmpModel } from "../server/provider/omp-rpc-protocol";
 import { createOmpProvider } from "../server/provider/registration";
 import { OMP_SESSION_PURPOSE_ENV } from "../server/provider/session-purpose";
+import {
+  OmpSubagentControlRegistry,
+  resolveCancelOmpSubagent,
+  resolveSteerOmpSubagent,
+} from "../server/subagents";
+import { OMP_SUBAGENT_STRIP_KIND, ompSubagentStripSchema } from "../shared/subagents";
 
 const pluginProviderModulePath = new URL(
   "../node_modules/@getpaseo/server/dist/server/server/agent/plugin-provider.js",
@@ -267,6 +273,7 @@ async function createHarness(
     stubbornDescendant?: boolean;
     /** False leaves no `omp` on PATH and no OMP_COMMAND, so only per-agent commands can launch. */
     defaultCommand?: boolean;
+    subagentControlRegistry?: OmpSubagentControlRegistry;
   } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "paseo-omp-conformance-"));
@@ -293,6 +300,7 @@ async function createHarness(
       OMP_SESSION_DIR: sessionDir,
     },
     replayTimeoutMs: 5_000,
+    subagentControlRegistry: options.subagentControlRegistry,
   });
   const adapter = (await import(pluginProviderModulePath)) as unknown as {
     PluginAgentClientRegistry: HostRegistryConstructor;
@@ -1053,6 +1061,117 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
       await harness.close();
     }
   });
+
+  testNoCov(
+    "cancels and steers a running child by agent while the root turn continues",
+    async () => {
+      const registry = new OmpSubagentControlRegistry();
+      const harness = await createHarness({ subagentControlRegistry: registry });
+      const agentId = "agent-with-children";
+      let session: AgentSession | undefined;
+      try {
+        session = await harness.client.createSession(
+          harness.config(),
+          harness.launchEnv({ PASEO_AGENT_ID: agentId }),
+          { persistSession: false },
+        );
+        const events = new EventLog();
+        const unsubscribe = session.subscribe((event) => events.push(event));
+        try {
+          const { turnId } = await session.startTurn("CONTRACT_SUBAGENT_HOLD", {
+            clientMessageId: "held",
+          });
+          const isStrip = (event: AgentStreamEvent) =>
+            event.type === "timeline" &&
+            event.item.type === "plugin" &&
+            event.item.kind === OMP_SUBAGENT_STRIP_KIND;
+          const published = await events.waitFor(isStrip);
+          if (published.type !== "timeline" || published.item.type !== "plugin") {
+            throw new Error("Expected the subagent strip");
+          }
+          const { subagents } = ompSubagentStripSchema.parse(published.item.data);
+          expect(subagents).toEqual([
+            {
+              id: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/),
+              agent: "worker",
+              description: "held child",
+              runningSince: expect.any(Number),
+            },
+          ]);
+          const handle = subagents[0]?.id ?? "";
+          await expect(
+            resolveCancelOmpSubagent({ agentId: "another-agent", subagentId: handle }, registry),
+          ).rejects.toThrow("This agent has no running OMP Plugin session");
+          await expect(
+            resolveSteerOmpSubagent(
+              { agentId, subagentId: "held-child", message: "focus" },
+              registry,
+            ),
+          ).rejects.toThrow("This subagent is no longer running");
+          await expect(
+            resolveSteerOmpSubagent(
+              { agentId, subagentId: handle, message: "Drop the glob" },
+              registry,
+            ),
+          ).resolves.toEqual({ accepted: true });
+          await expect(
+            resolveCancelOmpSubagent({ agentId, subagentId: handle }, registry),
+          ).resolves.toEqual({ cancelled: true });
+          // The parent keeps running after the stop: the child is canceled first, then the parent
+          // answers, and only then does its turn complete, exactly once.
+          await events.waitFor((event) => isTerminal(event) && hasTurnId(event, turnId));
+          const canceledAt = events.findIndex(
+            (event) =>
+              event.type === "provider_subagent" &&
+              event.event.type === "upsert" &&
+              event.event.status === "canceled",
+          );
+          const continuesAt = events.findIndex(
+            (event) =>
+              event.type === "timeline" &&
+              event.item.type === "assistant_message" &&
+              event.item.text.includes("ROOT_CONTINUES"),
+          );
+          const completedAt = events.findIndex(
+            (event) => isTerminal(event) && hasTurnId(event, turnId),
+          );
+          expect(canceledAt).toBeGreaterThanOrEqual(0);
+          expect(continuesAt).toBeGreaterThan(canceledAt);
+          expect(completedAt).toBeGreaterThan(continuesAt);
+          expect(events.filter((event) => isTerminal(event) && hasTurnId(event, turnId))).toEqual([
+            expect.objectContaining({ type: "turn_completed" }),
+          ]);
+          await expect(
+            resolveCancelOmpSubagent({ agentId, subagentId: handle }, registry),
+          ).resolves.toEqual({ cancelled: false });
+          const strips = events.filter(isStrip);
+          expect(strips.at(-1)).toEqual(
+            expect.objectContaining({ item: expect.objectContaining({ data: { subagents: [] } }) }),
+          );
+          const commands = await loggedCommands(harness);
+          expect(commands).toContainEqual(
+            expect.objectContaining({
+              type: "steer_subagent",
+              subagentId: "held-child",
+              message: "Drop the glob",
+            }),
+          );
+          expect(commands.filter((command) => command.type === "cancel_subagent")).toEqual([
+            expect.objectContaining({ subagentId: "held-child" }),
+          ]);
+          expect(commands.some((command) => command.type === "abort")).toBe(false);
+        } finally {
+          unsubscribe();
+        }
+        await session.close();
+        session = undefined;
+        expect(registry.get(agentId)).toBeUndefined();
+      } finally {
+        await session?.close();
+        await harness.close();
+      }
+    },
+  );
 
   test("steers and interrupts one active turn without duplicate terminals", async () => {
     const harness = await createHarness();

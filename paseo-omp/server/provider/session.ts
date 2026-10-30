@@ -6,10 +6,12 @@ import type {
   ProviderInput,
   ProviderSessionConfig,
 } from "@getpaseo/plugin/server/provider";
+import { isLiveOmpSubagentStatus } from "../../shared/subagents";
 import type {
   OmpOperationalFailure,
   OmpOperationalFailureReporter,
 } from "../operational-failure-diagnostics";
+import { type OmpSubagentControls, OmpSubagentNotRunningError } from "../subagents";
 import {
   mapOmpModels,
   nativeOmpModelId,
@@ -84,7 +86,7 @@ import {
   unknownTerminalOutcomeError,
 } from "./session-terminal";
 import { OmpSessionUsage } from "./session-usage";
-import { OmpSubsessionProjector } from "./subsessions";
+import { OmpSubsessionProjector, ompSubagentHandle } from "./subsessions";
 import {
   defaultOmpTimelineScheduler,
   OmpTimelineProjector,
@@ -298,7 +300,7 @@ async function settleSessionCleanup(promises: readonly Promise<void>[]): Promise
     throw new AggregateError(failures, "OMP session initialization cleanup failed");
   }
 }
-export class OmpProviderSession implements OmpOpenedSession {
+export class OmpProviderSession implements OmpOpenedSession, OmpSubagentControls {
   readonly id: string;
   readonly cwd: string;
 
@@ -463,6 +465,36 @@ export class OmpProviderSession implements OmpOpenedSession {
   }
   setBrowserAuthorizationIssuer(issue: ((url: string) => string | undefined) | null): void {
     this.projector.setBrowserAuthorizationIssuer(issue);
+  }
+
+  async cancelSubagent(handle: string): Promise<boolean> {
+    const target = await this.liveSubagent(handle);
+    return target ? await target.runtime.cancelSubagent(target.nativeId) : false;
+  }
+
+  async steerSubagent(handle: string, message: string): Promise<void> {
+    const target = await this.liveSubagent(handle);
+    if (!target) throw new OmpSubagentNotRunningError();
+    await target.runtime.steerSubagent(target.nativeId, message);
+  }
+
+  /**
+   * The native ID and runtime of a subagent this session's current runtime lists as running, or
+   * `null`. OMP repeats the check; this scopes the request to this session and answers exactly.
+   */
+  private async liveSubagent(
+    handle: string,
+  ): Promise<{ runtime: OmpRuntimeSession; nativeId: string } | null> {
+    if (this.closed || this.runtimeDead) return null;
+    const runtime = this.runtime;
+    const snapshots = await runtime.getSubagents();
+    if (runtime !== this.runtime || this.closed || this.runtimeDead) return null;
+    const live = snapshots.find(
+      (snapshot) =>
+        ompSubagentHandle(this.id, snapshot.id) === handle &&
+        isLiveOmpSubagentStatus(snapshot.status),
+    );
+    return live ? { runtime, nativeId: live.id } : null;
   }
 
   private readonly imageMaterializer = new OmpImageMaterializer();
@@ -2657,6 +2689,9 @@ export class OmpProviderSession implements OmpOpenedSession {
         stage: "timeline-projector",
       });
       throw error;
+    }
+    if (event.type === "tool_execution_start" && event.toolName === "task") {
+      this.subsessions?.anchorRootTask(event.toolCallId);
     }
     if (event.type === "tool_execution_end") this.resumeDeferredAgentEnd();
   }

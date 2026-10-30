@@ -144,7 +144,7 @@ export const OMP_RPC_COMMAND_POLICIES = {
   abort_and_restore_queue: "unsupported",
   btw: "unsupported",
   btw_cancel: "unsupported",
-  cancel_subagent: "unsupported",
+  cancel_subagent: "implemented",
   fork: "unsupported",
   get_btw_history: "unsupported",
   get_logout_accounts: "unsupported",
@@ -166,7 +166,7 @@ export const OMP_RPC_COMMAND_POLICIES = {
   set_ask_dialog: "implemented",
   set_cache_warming: "unsupported",
   set_slow_mode: "unsupported",
-  steer_subagent: "unsupported",
+  steer_subagent: "implemented",
 } as const;
 export const OMP_RPC_RESPONSE_POLICIES = OMP_RPC_COMMAND_POLICIES;
 export const OMP_PROTOCOL_VIOLATION_CATEGORIES = [
@@ -2001,6 +2001,8 @@ export const OmpSubagentsResultSchema = z.object({
     )
     .max(1_024),
 });
+export const OmpCancelSubagentResultSchema = z.object({ cancelled: z.boolean() });
+export const OmpSteerSubagentResultSchema = z.object({}).strict().optional();
 export const OmpSubagentMessagesResultSchema = z.object({
   sessionFile: boundedString(MAX_PATH_LENGTH),
   fromByte: z.number().int().nonnegative(),

@@ -13,6 +13,7 @@ import type {
   OmpOperationalFailure,
   OmpOperationalFailureReporter,
 } from "../operational-failure-diagnostics";
+import type { OmpSubagentControlRegistry } from "../subagents";
 import { discoverOmpCatalog } from "./catalog";
 import { normalizeOmpCatalogOptions } from "./config-normalization";
 import type { OmpMcpConnector } from "./host-tools";
@@ -724,6 +725,7 @@ export function createOmpConnection(
   reportOperationalFailure: OmpOperationalFailureReporter = () => {},
   resolveHostInheritEnv?: () => Promise<readonly string[]>,
   sessionLimit = new OmpSessionLimit(),
+  subagentControlRegistry?: OmpSubagentControlRegistry,
 ): ProviderConnection {
   const errorDetails = (error: unknown, fallback: string): { message: string } => {
     if (isOmpPublicError(error)) return { message: error.message };
@@ -758,6 +760,7 @@ export function createOmpConnection(
       session: OmpOpenedSession;
       nativeSessionId?: string;
       removeBrowserAuthorization?: () => void;
+      removeSubagentControls?: () => void;
     }
   >();
   const opening = new Map<
@@ -791,6 +794,7 @@ export function createOmpConnection(
     if (slot?.token !== token) return false;
     sessions.delete(sessionId);
     slot.removeBrowserAuthorization?.();
+    slot.removeSubagentControls?.();
     return true;
   };
 
@@ -1033,12 +1037,12 @@ export function createOmpConnection(
             nativeReservations.release(nativeSessionId, token);
             return;
           }
-          const browserAgentId = input.config.env.PASEO_AGENT_ID?.trim() || input.sessionId;
+          const agentId = input.config.env.PASEO_AGENT_ID?.trim() || input.sessionId;
           // A history session has no live Paseo browser tools to authorize.
           const browserAuthorization = historyOnly
             ? undefined
             : browserAuthorizationRegistry?.register(
-                browserAgentId,
+                agentId,
                 session.openPaseoBrowser.bind(session),
               );
           session.setBrowserAuthorizationIssuer(browserAuthorization?.issue ?? null);
@@ -1048,11 +1052,17 @@ export function createOmpConnection(
                 browserAuthorization.remove();
               }
             : undefined;
+          // A history session has no runtime, so it has no subagents to control.
+          const removeSubagentControls =
+            session instanceof OmpProviderSession
+              ? subagentControlRegistry?.register(agentId, session)
+              : undefined;
           sessions.set(input.sessionId, {
             token,
             session,
             nativeSessionId,
             ...(removeBrowserAuthorization ? { removeBrowserAuthorization } : {}),
+            ...(removeSubagentControls ? { removeSubagentControls } : {}),
           });
           await session.publishOpened(input.requestId);
           if (
@@ -1204,7 +1214,10 @@ export function createOmpConnection(
     shutdown.abort(shutdownReason);
     for (const { controller } of opening.values()) controller.abort(shutdownReason);
     for (const { session } of sessions.values()) session.beginConnectionShutdown();
-    for (const slot of sessions.values()) slot.removeBrowserAuthorization?.();
+    for (const slot of sessions.values()) {
+      slot.removeBrowserAuthorization?.();
+      slot.removeSubagentControls?.();
+    }
     const failures: unknown[] = [];
     const operationBatch = [...activeOperations];
     const operationResults = await Promise.allSettled(operationBatch);

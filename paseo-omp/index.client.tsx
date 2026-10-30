@@ -38,6 +38,7 @@ import {
   HUB_SIDEBAR_ITEM_ID,
   loadHubSnapshot,
 } from "./client/sidebar-compat";
+import { OmpSubagentStrip } from "./client/subagents-strip";
 import {
   type ComposerPillSettings,
   composerPillSettings,
@@ -48,6 +49,7 @@ import { OMP_MCP_AUTH_TIMELINE_KIND, ompMcpAuthorizationTimelineSchema } from ".
 import { type OmpStore, storeForProvider } from "./shared/omp-store";
 import { ompImageTimelineSchema, transformOmpImageToolItem } from "./shared/provider-image";
 import { listOmpQuotas } from "./shared/quota";
+import { OMP_SUBAGENT_STRIP_KIND, ompSubagentStripSchema } from "./shared/subagents";
 
 const PAGE_LIMIT = 200;
 const MAX_PAGES = 10;
@@ -236,6 +238,12 @@ export default function contribute(client: PluginClientContext) {
     version: 1,
     schema: ompMcpAuthorizationTimelineSchema,
     Component: OmpMcpAuthorizationCard,
+  });
+  const removeSubagentStripRenderer = client.addTimelineRenderer({
+    kind: OMP_SUBAGENT_STRIP_KIND,
+    version: 1,
+    schema: ompSubagentStripSchema,
+    Component: OmpSubagentStrip,
   });
   const removeImageTransformer = client.addTimelineTransformer({
     id: "omp-images",
@@ -544,6 +552,7 @@ export default function contribute(client: PluginClientContext) {
     pills.clear();
     removeImageRenderer();
     removeMcpAuthorizationRenderer();
+    removeSubagentStripRenderer();
     removeImageTransformer();
     removeOpenConfig();
     removeConfigEntry();

@@ -19,6 +19,7 @@ vi.mock("../client/provider-icon", () => ({ quotaProviderIcon: () => () => null 
 vi.mock("../client/provider-image", () => ({ OmpImageTimeline: () => null }));
 vi.mock("../client/quota-popover", () => ({ QuotaPopover: () => null }));
 vi.mock("../client/sessions-popover", () => ({ SessionsPopover: () => null }));
+vi.mock("../client/subagents-strip", () => ({ OmpSubagentStrip: () => null }));
 
 import contribute from "../index.client";
 import { listOmpQuotas } from "../shared/quota";
@@ -126,6 +127,8 @@ test("owned agent directory updates reconcile new agent pills and cached quota r
     expect(buttons.filter((button) => button.id === "mcp").map((button) => button.agentId)).toEqual(
       ["alpha", "team-beta"],
     );
+    // Subagent controls live in the timeline, beside Paseo's own subagent pill.
+    expect(buttons.some((button) => button.id === "subagents")).toBe(false);
     const quota = (agentId: string) => {
       const button = buttons.findLast(
         (button) => button.id === "quota" && button.agentId === agentId,
