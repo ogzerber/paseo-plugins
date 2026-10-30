@@ -1463,9 +1463,15 @@ export class OmpProviderSession implements OmpOpenedSession {
     } catch (error) {
       if (this.closed || this.runtimeDead || turn.generation !== this.generation) return;
       turn.manualCompactionPending = false;
+      // OMP 18.13.3+ reports the outcome in manual_compaction_end before rejecting `compact`.
+      const outcome = turn.manualCompactionOutcome;
+      if (outcome === "skipped") {
+        await this.finishTurn(turn, turn.interrupted ? "canceled" : "completed");
+        return;
+      }
       const raw = providerError(error, "OMP compaction failed");
       const failure = { message: this.dataFilter.text(raw.message, 4_096) };
-      const state = turn.interrupted ? "canceled" : "failed";
+      const state = turn.interrupted || outcome === "canceled" ? "canceled" : "failed";
       this.compaction.finish(state, { message: failure.message });
       await this.finishTurn(turn, state, state === "failed" ? failure : undefined, true, true);
     }
@@ -2359,7 +2365,8 @@ export class OmpProviderSession implements OmpOpenedSession {
       event.type === "ttsr_triggered" ||
       event.type === "cache_warming_start" ||
       event.type === "cache_warming_end" ||
-      event.type === "queue_update"
+      event.type === "queue_update" ||
+      event.type === "session_info_update"
     ) {
       return;
     }
@@ -2376,7 +2383,8 @@ export class OmpProviderSession implements OmpOpenedSession {
       event.type === "auto_retry_end" ||
       event.type === "compaction_start" ||
       event.type === "compaction_end" ||
-      event.type === "advisor_yielded"
+      event.type === "advisor_yielded" ||
+      event.type === "extension_error"
     ) {
       this.projector.projectPassive(event);
       return;
@@ -2390,14 +2398,23 @@ export class OmpProviderSession implements OmpOpenedSession {
       this.scheduleCommittedConfigRefresh();
       return;
     }
-    if (event.type === "model_changed" || event.type === "thinking_level_changed") {
+    if (
+      event.type === "model_changed" ||
+      event.type === "thinking_level_changed" ||
+      event.type === "config_update"
+    ) {
       this.scheduleCommittedConfigRefresh();
       return;
     }
     const turn =
       this.activeTurn ?? (event.type === "agent_start" ? this.openNativeRunTurn() : null);
     if (!turn) {
-      if (event.type === "auto_compaction_start" || event.type === "auto_compaction_end") {
+      if (
+        event.type === "auto_compaction_start" ||
+        event.type === "auto_compaction_end" ||
+        event.type === "manual_compaction_start" ||
+        event.type === "manual_compaction_end"
+      ) {
         this.projector.projectPassive(event);
       }
       return;
@@ -2542,10 +2559,17 @@ export class OmpProviderSession implements OmpOpenedSession {
       this.compaction.start(turn, "auto", event.action);
       return;
     }
-    if (event.type === "auto_compaction_end") {
-      if (this.compaction.handleAutoEnd(turn, event)) {
-        this.usage.schedulePoll(turn, USAGE_REFRESH_MS);
-      }
+    if (event.type === "manual_compaction_start") {
+      turn.nativeActivity = true;
+      this.cancelLocalOnlyCompletion(turn);
+      // A no-op when this turn's own `compact` call already opened the operation.
+      this.compaction.start(turn, "manual");
+      return;
+    }
+    if (event.type === "auto_compaction_end" || event.type === "manual_compaction_end") {
+      const outcome = this.compaction.handleEnd(turn, event);
+      if (outcome && turn.manualCompaction) turn.manualCompactionOutcome = outcome;
+      if (outcome) this.usage.schedulePoll(turn, USAGE_REFRESH_MS);
       return;
     }
     if (event.type === "session_settled") {

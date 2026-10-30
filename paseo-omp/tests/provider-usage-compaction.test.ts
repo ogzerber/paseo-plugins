@@ -1287,4 +1287,184 @@ describe("OMP direct provider", () => {
     );
     await connection.close();
   });
+
+  test("keeps one manual compaction row when OMP reports manual_compaction events", async () => {
+    const runtime = new FakeOmpRuntime();
+    const compact = Promise.withResolvers<void>();
+    const { connection, events } = await createHarness(runtime);
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    session.compactGate = compact.promise;
+    const turnId = turnIdFrom(await startPrompt(connection, events, "manual-events", "/compact"));
+
+    session.emit({ type: "manual_compaction_start" });
+    session.emit({
+      type: "manual_compaction_end",
+      result: { tokensBefore: 2_000 },
+      aborted: false,
+    });
+    compact.resolve();
+    await events.waitFor(
+      (event) =>
+        event.type === "session.turn" && event.turnId === turnId && event.state === "completed",
+    );
+    const operations = events.flatMap((event) =>
+      event.type === "timeline.item" && event.item.type === "compaction" ? [event.item] : [],
+    );
+    expect(operations.map((item) => item.status)).toEqual(["loading", "completed"]);
+    expect(operations[1]).toEqual(
+      expect.objectContaining({ id: operations[0]?.id, trigger: "manual", preTokens: 2_000 }),
+    );
+    await connection.close();
+  });
+
+  test("completes a manual compaction turn that OMP skipped", async () => {
+    const runtime = new FakeOmpRuntime();
+    const compact = Promise.withResolvers<void>();
+    const { connection, events } = await createHarness(runtime);
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    session.compactGate = compact.promise;
+    session.compactError = new Error("Already compacted");
+    const turnId = turnIdFrom(await startPrompt(connection, events, "manual-skip", "/compact"));
+
+    session.emit({ type: "manual_compaction_start" });
+    session.emit({
+      type: "manual_compaction_end",
+      aborted: false,
+      skipped: true,
+      errorMessage: "Already compacted",
+    });
+    compact.resolve();
+    await events.waitFor(
+      (event) =>
+        event.type === "session.turn" && event.turnId === turnId && event.state === "completed",
+    );
+    const loading = events.find(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "compaction" &&
+        event.item.status === "loading",
+    );
+    if (loading?.type !== "timeline.item") throw new Error("Expected compaction loading update");
+    expect(
+      events.flatMap((event) =>
+        event.type === "timeline.item" && event.item.id === loading.item.id ? [event.item] : [],
+      ),
+    ).toEqual([
+      loading.item,
+      {
+        type: "notification",
+        id: loading.item.id,
+        level: "info",
+        message: "Already compacted",
+      },
+    ]);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state === "failed",
+      ),
+    ).toBe(false);
+    await connection.close();
+  });
+
+  test("cancels a manual compaction turn that OMP reports as aborted", async () => {
+    const runtime = new FakeOmpRuntime();
+    const compact = Promise.withResolvers<void>();
+    const { connection, events } = await createHarness(runtime);
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    session.compactGate = compact.promise;
+    session.compactError = new Error("Compaction cancelled");
+    const turnId = turnIdFrom(await startPrompt(connection, events, "manual-abort", "/compact"));
+
+    session.emit({ type: "manual_compaction_start" });
+    session.emit({
+      type: "manual_compaction_end",
+      aborted: true,
+      errorMessage: "Compaction cancelled",
+    });
+    compact.resolve();
+    await events.waitFor(
+      (event) =>
+        event.type === "session.turn" && event.turnId === turnId && event.state === "canceled",
+    );
+    expect(
+      events.some(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state === "failed",
+      ),
+    ).toBe(false);
+    await connection.close();
+  });
+
+  test("renders a manual compaction that OMP starts inside a prompt turn", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const turnId = turnIdFrom(await startPrompt(connection, events, "extension-compact", "work"));
+
+    session.emit({ type: "manual_compaction_start" });
+    session.emit({
+      type: "manual_compaction_end",
+      result: { tokensBefore: 3_000 },
+      aborted: false,
+    });
+    const operations = events.flatMap((event) =>
+      event.type === "timeline.item" && event.item.type === "compaction" ? [event.item] : [],
+    );
+    expect(operations.map((item) => [item.status, item.trigger])).toEqual([
+      ["loading", "manual"],
+      ["completed", "manual"],
+    ]);
+    expect(operations[1]?.id).toBe(operations[0]?.id);
+    await finishTurn(events, session, turnId);
+    await connection.close();
+  });
+
+  test("renders a manual compaction that OMP starts while idle", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const baseline = events.length;
+
+    session.emit({ type: "manual_compaction_start", mode: "snapcompact" });
+    session.emit({
+      type: "manual_compaction_end",
+      result: { tokensBefore: 4_000 },
+      aborted: false,
+    });
+    session.emit({ type: "manual_compaction_start" });
+    session.emit({
+      type: "manual_compaction_end",
+      aborted: false,
+      skipped: true,
+      errorMessage: "Nothing to compact (session too small)",
+    });
+
+    expect(
+      events
+        .slice(baseline)
+        .flatMap((event) => (event.type === "timeline.item" ? [event.item] : [])),
+    ).toEqual([
+      { type: "compaction", id: "omp:compaction:1", status: "loading", trigger: "manual" },
+      {
+        type: "compaction",
+        id: "omp:compaction:1",
+        status: "completed",
+        trigger: "manual",
+        preTokens: 4_000,
+      },
+      { type: "compaction", id: "omp:compaction:2", status: "loading", trigger: "manual" },
+      { type: "compaction", id: "omp:compaction:2", status: "completed", trigger: "manual" },
+      {
+        type: "notification",
+        id: "omp:compaction:2:skipped",
+        level: "warning",
+        message: "Nothing to compact (session too small)",
+      },
+    ]);
+    await connection.close();
+  });
 });

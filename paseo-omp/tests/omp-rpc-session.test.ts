@@ -413,6 +413,61 @@ describe("OMP RPC transport", () => {
     await session.close();
   });
 
+  test.each([
+    { type: "manual_compaction_start" },
+    { type: "manual_compaction_start", mode: "snapcompact" },
+    {
+      type: "manual_compaction_end",
+      result: { summary: "kept", firstKeptEntryId: "entry-1", tokensBefore: 48_210, details: {} },
+      aborted: false,
+    },
+    {
+      type: "manual_compaction_end",
+      aborted: false,
+      skipped: true,
+      errorMessage: "Already compacted",
+    },
+    { type: "manual_compaction_end", aborted: true, errorMessage: "Compaction cancelled" },
+    {
+      type: "extension_error",
+      extensionPath: "/repo/.omp/extensions/lint.ts",
+      event: "tool_call",
+      error: "lint hook threw",
+    },
+    { type: "session_info_update", title: "Renamed", sessionId: "native-session" },
+    { type: "session_info_update", sessionId: "native-session" },
+    {
+      type: "config_update",
+      model: { provider: "openai", id: "gpt-5.4", name: "GPT", contextWindow: 200_000 },
+      thinkingLevel: "high",
+    },
+    { type: "config_update" },
+  ])("accepts the OMP 18.14 $type frame without a protocol violation", async (frame) => {
+    const child = new FakeRpcChild();
+    const diagnostics: OmpProtocolViolationDiagnostic[] = [];
+    observeCommands(child, (command) => {
+      if (command.type !== "negotiate_protocol") return;
+      child.write({
+        type: "response",
+        id: command.id,
+        success: true,
+        data: { protocolVersion: 2 },
+      });
+    });
+    const opening = runtimeFor(child, [], undefined, (diagnostic) => {
+      diagnostics.push(diagnostic);
+    }).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+    const received = nextEvent((listener) => session.onEvent(listener));
+
+    child.write(frame);
+
+    await expect(received).resolves.toEqual(expect.objectContaining({ type: frame.type }));
+    expect(diagnostics).toEqual([]);
+    await session.close();
+  });
+
   test("drops late background progress for an ended tool call without a violation", async () => {
     const child = new FakeRpcChild();
     const diagnostics: OmpProtocolViolationDiagnostic[] = [];

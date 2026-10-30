@@ -715,6 +715,46 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
     }
   });
 
+  test("accepts OMP 18.14 manual compaction events and side-channel frames", async () => {
+    const harness = await createHarness();
+    let session: AgentSession | undefined;
+    try {
+      session = await harness.client.createSession(harness.config(), harness.launchEnv(), {
+        persistSession: false,
+      });
+      const compact = await runTurn(session, "/compact CONTRACT_MANUAL_EVENTS", "manual-events");
+      expect(compact.events.filter(isTerminal)).toEqual([
+        expect.objectContaining({ type: "turn_completed", turnId: compact.turnId }),
+      ]);
+      const compactions = compact.events.flatMap((event) =>
+        event.type === "timeline" && event.item.type === "compaction" ? [event.item] : [],
+      );
+      expect(compactions).toEqual([
+        expect.objectContaining({ status: "loading", trigger: "manual" }),
+        expect.objectContaining({ status: "completed", trigger: "manual", preTokens: 1_234 }),
+      ]);
+
+      const side = await runTurn(session, "CONTRACT_SIDE_CHANNELS", "side-channels");
+      expect(side.events.filter(isTerminal)).toEqual([
+        expect.objectContaining({ type: "turn_completed", turnId: side.turnId }),
+      ]);
+      expect(side.events).toContainEqual(
+        expect.objectContaining({
+          type: "timeline",
+          item: expect.objectContaining({
+            type: "notification",
+            level: "error",
+            message:
+              "OMP extension /repo/.omp/extensions/lint.ts failed in tool_call: lint hook threw",
+          }),
+        }),
+      );
+    } finally {
+      await session?.close();
+      await harness.close();
+    }
+  });
+
   test("commits model and thinking changes and rejects unsupported host configuration", async () => {
     const harness = await createHarness();
     let session: AgentSession | undefined;

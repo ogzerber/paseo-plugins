@@ -467,6 +467,9 @@ export class OmpTimelineProjector {
       event.type === "auto_compaction_end" ||
       event.type === "compaction_start" ||
       event.type === "compaction_end" ||
+      event.type === "manual_compaction_start" ||
+      event.type === "manual_compaction_end" ||
+      event.type === "extension_error" ||
       event.type === "advisor_yielded" ||
       event.type === "config_warnings_changed" ||
       event.type === "advisor_cost_changed" ||
@@ -743,6 +746,19 @@ export class OmpTimelineProjector {
       });
       return;
     }
+    if (event.type === "extension_error") {
+      this.noticeSequence += 1;
+      this.publish({
+        type: "notification",
+        id: `omp:extension-error:${this.noticeSequence}`,
+        level: "error",
+        message: this.dataFilter.text(
+          `OMP extension ${event.extensionPath} failed in ${event.event}: ${event.error}`,
+          64 * 1024,
+        ),
+      });
+      return;
+    }
     if (event.type === "advisor_yielded") {
       this.noticeSequence += 1;
       this.publish({
@@ -753,7 +769,11 @@ export class OmpTimelineProjector {
       });
       return;
     }
-    if (event.type === "auto_compaction_start" || event.type === "compaction_start") {
+    if (
+      event.type === "auto_compaction_start" ||
+      event.type === "compaction_start" ||
+      event.type === "manual_compaction_start"
+    ) {
       const trigger = event.type === "auto_compaction_start" ? "auto" : "manual";
       const action = event.type === "auto_compaction_start" ? event.action : undefined;
       if (this.discardedCompactionEnds > 0) {
@@ -781,7 +801,11 @@ export class OmpTimelineProjector {
       this.publish({ type: "compaction", id: slot.id, status: "loading", trigger });
       return;
     }
-    if (event.type === "auto_compaction_end" || event.type === "compaction_end") {
+    if (
+      event.type === "auto_compaction_end" ||
+      event.type === "compaction_end" ||
+      event.type === "manual_compaction_end"
+    ) {
       if (this.discardedCompactionEnds > 0) {
         this.discardedCompactionEnds -= 1;
         return;
@@ -803,7 +827,7 @@ export class OmpTimelineProjector {
         this.discardedCompactionEnds = 1;
         return;
       }
-      if (event.willRetry) {
+      if (event.type !== "manual_compaction_end" && event.willRetry) {
         slot.retrying = true;
         return;
       }
@@ -826,10 +850,9 @@ export class OmpTimelineProjector {
           type: "notification",
           id: `${slot.id}:skipped`,
           level: "warning",
-          message: "OMP compaction was skipped",
+          message: this.dataFilter.text(event.errorMessage ?? "OMP compaction was skipped", 4_096),
         });
-      }
-      if (event.aborted || event.errorMessage) {
+      } else if (event.aborted || event.errorMessage) {
         this.publish({
           type: "error",
           id: `${slot.id}:error`,

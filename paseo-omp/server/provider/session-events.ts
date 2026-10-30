@@ -24,6 +24,7 @@ export function isRuntimeConfigEvent(event: OmpRpcEvent): boolean {
   return (
     event.type === "model_changed" ||
     event.type === "thinking_level_changed" ||
+    event.type === "config_update" ||
     event.type === "retry_fallback_applied" ||
     event.type === "retry_fallback_succeeded"
   );

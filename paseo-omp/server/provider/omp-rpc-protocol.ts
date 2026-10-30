@@ -71,6 +71,8 @@ export const OMP_SESSION_EVENT_POLICIES = {
   tool_execution_end: "normalize",
   auto_compaction_start: "normalize",
   auto_compaction_end: "normalize",
+  manual_compaction_start: "normalize",
+  manual_compaction_end: "normalize",
   auto_retry_start: "normalize",
   auto_retry_end: "normalize",
   retry_fallback_applied: "normalize",
@@ -148,9 +150,15 @@ export const OMP_RPC_COMMAND_POLICIES = {
   get_logout_accounts: "unsupported",
   goal: "unsupported",
   live_mute: "unsupported",
+  live_connect: "unsupported",
   live_start: "unsupported",
   live_stop: "unsupported",
   logout: "unsupported",
+  navigate_tree: "unsupported",
+  abort_branch_summary: "unsupported",
+  set_label: "unsupported",
+  dictation_start: "unsupported",
+  dictation_stop: "unsupported",
   predict_word: "unsupported",
   predict_word_feedback: "unsupported",
   promote_queued_message: "unsupported",
@@ -254,9 +262,14 @@ export const OMP_PROTOCOL_EVENT_TYPES = [
   "todo_auto_clear",
   "auto_compaction_start",
   "auto_compaction_end",
+  "manual_compaction_start",
+  "manual_compaction_end",
   "available_commands_update",
   "notice",
   "command_output",
+  "extension_error",
+  "session_info_update",
+  "config_update",
   "extension_ui_request",
   "prompt_result",
   "host_tool_call",
@@ -403,6 +416,8 @@ function eventSchemaClassification(
     case "cache_warming_start":
     case "cache_warming_end":
     case "queue_update":
+    case "session_info_update":
+    case "config_update":
       return { reason: "configuration-event-schema", expected: "valid-configuration-event" };
     case "extension_ui_request":
       return { reason: "extension-ui-schema", expected: "valid-extension-ui-event" };
@@ -1607,6 +1622,17 @@ const OmpAgentSessionEventSchema = z.discriminatedUnion("type", [
     skipped: z.boolean().optional(),
   }),
   z.object({
+    type: z.literal("manual_compaction_start"),
+    mode: boundedString(MAX_CONFIG_EVENT_TEXT_BYTES).optional(),
+  }),
+  z.object({
+    type: z.literal("manual_compaction_end"),
+    result: OmpCompactionResultSchema.optional(),
+    aborted: z.boolean(),
+    skipped: z.boolean().optional(),
+    errorMessage: boundedString(64 * 1024).optional(),
+  }),
+  z.object({
     type: z.literal("notice"),
     id: IDENTIFIER.optional(),
     level: z.enum(["info", "warning", "error"]),
@@ -1799,6 +1825,14 @@ export const OmpRuntimeEventSchema = z.discriminatedUnion("type", [
     commands: z.array(OmpAvailableCommandSchema).max(MAX_ARRAY_ITEMS),
   }),
   z.object({ type: z.literal("command_output"), text: TEXT.optional() }),
+  z.object({
+    type: z.literal("extension_error"),
+    extensionPath: boundedString(MAX_PATH_LENGTH),
+    event: NAME,
+    error: boundedString(64 * 1024),
+  }),
+  z.object({ type: z.literal("session_info_update") }),
+  z.object({ type: z.literal("config_update") }),
   OmpExtensionUiRequestSchema,
   z.object({
     type: z.literal("prompt_result"),

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ProviderError } from "@getpaseo/plugin/server/provider";
 import type { OmpMessage, OmpRpcEvent } from "./omp-rpc-protocol";
+import type { CompactionOutcome } from "./session-compaction";
 
 export type PendingUser = {
   clientMessageId: string;
@@ -56,6 +57,7 @@ export type ActiveTurn = {
   usageSampleFloor: number;
   manualCompaction: boolean;
   manualCompactionPending: boolean;
+  manualCompactionOutcome?: CompactionOutcome;
   manualCompactionDeadlineTimer?: unknown;
   agentEndPending: boolean;
   agentEndRetryTimer?: unknown;

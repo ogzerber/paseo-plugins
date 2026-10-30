@@ -490,6 +490,16 @@ function handlePrompt(command: Record<string, unknown>): void {
         emitChildContract(message);
       } else if (message.includes("CONTRACT_LARGE")) {
         emitLargeContract(message);
+      } else if (message.includes("CONTRACT_SIDE_CHANNELS")) {
+        send({
+          type: "extension_error",
+          extensionPath: "/repo/.omp/extensions/lint.ts",
+          event: "tool_call",
+          error: "lint hook threw",
+        });
+        send({ type: "session_info_update", title: "Renamed", sessionId });
+        send({ type: "config_update", model: currentModel, thinkingLevel });
+        emitBasicPrompt(message);
       } else if (message.includes("CONTRACT_DIE")) {
         send({ type: "turn_start" });
         send({ type: "agent_start" });
@@ -662,6 +672,15 @@ reader.on("line", (line) => {
       respond(command);
       break;
     case "compact":
+      // OMP 18.13.3+ brackets every manual compaction with these events before answering.
+      if (String(command.customInstructions ?? "").includes("CONTRACT_MANUAL_EVENTS")) {
+        send({ type: "manual_compaction_start" });
+        send({
+          type: "manual_compaction_end",
+          result: { summary: "kept", firstKeptEntryId: "user-1", tokensBefore: 1_234, details: {} },
+          aborted: false,
+        });
+      }
       respond(command, { tokensBefore: 1_234 });
       break;
     case "handoff":

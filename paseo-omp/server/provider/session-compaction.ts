@@ -7,6 +7,7 @@ import type { OmpSessionUsage } from "./session-usage";
 import type { OmpTimelineProjector } from "./timeline-projector";
 
 type Emit = (event: ProviderEvent) => void;
+export type CompactionOutcome = "completed" | "failed" | "canceled" | "skipped";
 
 export interface ActiveCompaction {
   id: string;
@@ -73,51 +74,54 @@ export class OmpSessionCompaction {
     });
   }
 
-  handleAutoEnd(
+  handleEnd(
     turn: ActiveTurn,
-    event: Extract<OmpRpcEvent, { type: "auto_compaction_end" }>,
-  ): boolean {
+    event: Extract<OmpRpcEvent, { type: "auto_compaction_end" | "manual_compaction_end" }>,
+  ): CompactionOutcome | undefined {
     if (this.discardedEnds > 0) {
       this.discardedEnds -= 1;
-      return false;
+      return undefined;
     }
     const operation = this.operation;
+    const trigger = event.type === "auto_compaction_end" ? "auto" : "manual";
     if (
-      operation?.trigger !== "auto" ||
+      operation?.trigger !== trigger ||
       operation.turnId !== turn.turnId ||
       operation.generation !== turn.generation
     ) {
-      return false;
+      return undefined;
     }
-    if (event.action !== undefined && operation.action !== event.action) {
-      this.retire("OMP emitted overlapping compactions");
-      this.discardedEnds = 1;
-      return false;
+    if (event.type === "auto_compaction_end") {
+      if (event.action !== undefined && operation.action !== event.action) {
+        this.retire("OMP emitted overlapping compactions");
+        this.discardedEnds = 1;
+        return undefined;
+      }
+      if (event.willRetry) {
+        operation.retrying = true;
+        return undefined;
+      }
+      if (operation.retrying) {
+        operation.retrying = false;
+        return undefined;
+      }
     }
-    if (event.willRetry) {
-      operation.retrying = true;
-      return false;
-    }
-    if (operation.retrying) {
-      operation.retrying = false;
-      return false;
-    }
-    const state = event.aborted
+    const state: CompactionOutcome = event.aborted
       ? "canceled"
-      : event.errorMessage
-        ? "failed"
-        : event.skipped
-          ? "skipped"
+      : event.skipped
+        ? "skipped"
+        : event.errorMessage
+          ? "failed"
           : "completed";
     this.finish(state, {
       tokensBefore: event.result?.tokensBefore ?? event.result?.preTokens,
       message: event.errorMessage,
     });
-    return true;
+    return state;
   }
 
   finish(
-    state: "completed" | "failed" | "canceled" | "skipped",
+    state: CompactionOutcome,
     options: { tokensBefore?: number | null; message?: string } = {},
   ): void {
     const operation = this.operation;

@@ -1258,4 +1258,34 @@ describe("OMP direct provider", () => {
     expect(failures).toEqual([{ category: "terminal-outcome", stage: "failed" }]);
     await terminal.connection.close();
   });
+
+  test("surfaces extension errors and ignores session title updates", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const baseline = events.length;
+
+    session.emit({
+      type: "extension_error",
+      extensionPath: "/repo/.omp/extensions/lint.ts",
+      event: "tool_call",
+      error: "lint hook threw",
+    });
+    session.emit({ type: "session_info_update" });
+
+    expect(events.slice(baseline)).toEqual([
+      {
+        type: "timeline.item",
+        sessionId: "session-1",
+        item: {
+          type: "notification",
+          id: "omp:extension-error:1",
+          level: "error",
+          message:
+            "OMP extension /repo/.omp/extensions/lint.ts failed in tool_call: lint hook threw",
+        },
+      },
+    ]);
+    await connection.close();
+  });
 });

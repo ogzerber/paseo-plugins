@@ -615,6 +615,26 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
+  test("refreshes committed config when a builtin command reports config_update", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const baselineLookups = session.stateLookups;
+    session.currentModel = ALTERNATE_MODEL;
+    session.thinkingLevel = "high";
+
+    const committed = events.waitFor(
+      (event) =>
+        event.type === "session.config" && event.config.model === ALTERNATE_MODEL_PUBLIC_ID,
+    );
+    session.emit({ type: "config_update" });
+    await committed;
+
+    expect(session.stateLookups).toBe(baselineLookups + 1);
+    expect(events.some((event) => event.type === "session.runtime_failed")).toBe(false);
+    await connection.close();
+  });
+
   test("coalesces a runtime config event flood and publishes only changed state", async () => {
     const { connection, events, runtime } = await createHarness();
     await openSession(connection, events);
