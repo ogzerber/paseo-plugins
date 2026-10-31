@@ -1,7 +1,7 @@
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Modal, ScrollView } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useState } from "react";
-import { Image, Pressable, Text, useWindowDimensions, View } from "react-native";
+import { Image, Pressable, Text, View } from "react-native";
 import { type OmpImageTimelineData, visibleOmpImageText } from "../shared/provider-image";
 
 export function OmpImageTimeline({ item, theme }: PluginTimelineItemProps<OmpImageTimelineData>) {
@@ -51,7 +51,7 @@ export function OmpImageTimeline({ item, theme }: PluginTimelineItemProps<OmpIma
         ) : (
           <Pressable
             key={image.id}
-            accessibilityRole="imagebutton"
+            accessibilityRole="button"
             accessibilityLabel={`Enlarge ${item.data.label} image ${index + 1}`}
             onPress={() => setEnlargedId(image.id)}
           >
@@ -105,7 +105,6 @@ function EnlargedImage({
   label: string;
   theme: PluginTimelineItemProps<OmpImageTimelineData>["theme"];
 }) {
-  const screen = useWindowDimensions();
   const [natural, setNatural] = useState<{ width: number; height: number } | null>(null);
   const [actualSize, setActualSize] = useState(false);
   const [renderFailed, setRenderFailed] = useState(false);
@@ -121,12 +120,10 @@ function EnlargedImage({
       current = false;
     };
   }, [uri]);
-  // Leaves room for the modal header and the caption on short windows.
-  const height = Math.round(screen.height * 0.55);
   const canZoom = natural !== null;
-  const fittedStyle = natural
-    ? { width: "100%" as const, aspectRatio: natural.width / natural.height, maxHeight: height }
-    : { width: "100%" as const, height };
+  // The modal body is bounded (`scrollable={false}`), so the image and its scroller share its height
+  // with the caption instead of guessing from the window.
+  const fill = { flex: 1, minHeight: 0 };
   const mutedText = {
     color: theme.colors.foregroundMuted,
     fontSize: 12,
@@ -136,7 +133,7 @@ function EnlargedImage({
     return <Text style={mutedText}>This image could not be rendered on this Paseo client.</Text>;
   }
   return (
-    <View style={{ gap: 8 }}>
+    <View style={[fill, { gap: 8 }]}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={
@@ -144,9 +141,10 @@ function EnlargedImage({
         }
         disabled={!canZoom}
         onPress={() => setActualSize((value) => !value)}
+        style={fill}
       >
         {actualSize && natural ? (
-          <ScrollView style={{ height }}>
+          <ScrollView style={fill}>
             <ScrollView horizontal>
               <Image
                 source={{ uri }}
@@ -162,7 +160,7 @@ function EnlargedImage({
             resizeMode="contain"
             accessibilityLabel={`${label} enlarged image`}
             onError={() => setRenderFailed(true)}
-            style={fittedStyle}
+            style={[fill, { width: "100%" }]}
           />
         )}
       </Pressable>
