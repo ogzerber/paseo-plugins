@@ -108,26 +108,31 @@ function EnlargedImage({
   const screen = useWindowDimensions();
   const [natural, setNatural] = useState<{ width: number; height: number } | null>(null);
   const [actualSize, setActualSize] = useState(false);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const [renderFailed, setRenderFailed] = useState(false);
+  const [sizeUnavailable, setSizeUnavailable] = useState(false);
   useEffect(() => {
     let current = true;
     Image.getSize(
       uri,
       (width, height) => current && setNatural({ width, height }),
-      () => current && setLoadFailed(true),
+      () => current && setSizeUnavailable(true),
     );
     return () => {
       current = false;
     };
   }, [uri]);
-  const height = Math.round(screen.height * 0.7);
+  // Leaves room for the modal header and the caption on short windows.
+  const height = Math.round(screen.height * 0.55);
   const canZoom = natural !== null;
+  const fittedStyle = natural
+    ? { width: "100%" as const, aspectRatio: natural.width / natural.height, maxHeight: height }
+    : { width: "100%" as const, height };
   const mutedText = {
     color: theme.colors.foregroundMuted,
     fontSize: 12,
     textAlign: "center" as const,
   };
-  if (failed) {
+  if (failed || renderFailed) {
     return <Text style={mutedText}>This image could not be rendered on this Paseo client.</Text>;
   }
   return (
@@ -146,6 +151,7 @@ function EnlargedImage({
               <Image
                 source={{ uri }}
                 accessibilityLabel={`${label} enlarged image`}
+                onError={() => setRenderFailed(true)}
                 style={{ width: natural.width, height: natural.height }}
               />
             </ScrollView>
@@ -155,8 +161,8 @@ function EnlargedImage({
             source={{ uri }}
             resizeMode="contain"
             accessibilityLabel={`${label} enlarged image`}
-            onError={() => setLoadFailed(true)}
-            style={{ width: "100%", height }}
+            onError={() => setRenderFailed(true)}
+            style={fittedStyle}
           />
         )}
       </Pressable>
@@ -166,7 +172,8 @@ function EnlargedImage({
             ? `${natural.width} × ${natural.height}px · tap to fit`
             : `Tap the image to see it at ${natural.width} × ${natural.height}px`}
         </Text>
-      ) : loadFailed ? (
+      ) : null}
+      {sizeUnavailable ? (
         <Text style={mutedText}>The actual size of this image is not available.</Text>
       ) : null}
     </View>
